@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl" class="h-full bg-slate-50">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>نظام تسعير المرتجعات — الإعدادات</title>
+  <meta name="description" content="إعداد الاتصال بـ Google Apps Script واختباره." />
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            // Cairo covers Arabic; the Latin fallbacks keep URLs and codes legible.
+            sans: ['Cairo', 'Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
+            mono: ['Cairo', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#9881;&#65039;</text></svg>" />
+</head>
+
+<body class="h-full font-sans text-slate-800 antialiased">
+
+  <!-- ============================== NAVBAR ============================== -->
+  <header class="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur">
+    <div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6">
+      <a href="./index.html" class="flex items-center gap-3">
+        <span class="grid h-9 w-9 place-items-center rounded-lg bg-indigo-600 text-lg font-bold text-white shadow-sm">م</span>
+        <span class="text-base font-semibold tracking-tight">نظام تسعير المرتجعات</span>
+      </a>
+
+      <nav class="flex items-center gap-1 text-sm font-medium">
+        <a href="./index.html"
+           class="rounded-lg px-3 py-2 text-slate-600 transition hover:bg-slate-100 hover:text-slate-900">المرتجعات</a>
+        <a href="./settings.html"
+           class="rounded-lg bg-slate-100 px-3 py-2 text-slate-900"
+           aria-current="page">الإعدادات</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-3xl px-4 py-8 sm:px-6">
+
+    <!-- ======================= READ: share link ======================== -->
+    <section class="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <h1 class="text-lg font-semibold">جلب البيانات (رابط المشاركة)</h1>
+      <p class="mt-1 text-sm text-slate-500">
+        القراءة تتم من رابط الجدول مباشرةً — <strong>بلا مفتاح API وبلا إعداد</strong>،
+        فليس هناك ما يُنسى ولا ما يحتاج تدويراً. الشرط الوحيد أن يكون الجدول
+        مشتركاً برابط <strong>«أي شخص لديه الرابط»</strong>.
+      </p>
+
+      <form id="form-read" class="mt-6 space-y-5" novalidate>
+
+        <div>
+          <label for="sheet-url" class="block text-sm font-medium text-slate-700">
+            رابط جدول Google Sheets
+          </label>
+          <input id="sheet-url" name="sheetUrl" type="url" spellcheck="false"
+                 autocomplete="off"
+                 placeholder="https://docs.google.com/spreadsheets/d/1AbCdEf.../edit"
+                 dir="ltr"
+                 class="mt-1.5 block w-full rounded-lg border-slate-300 font-mono text-sm
+                        placeholder:font-sans placeholder:text-slate-400
+                        focus:border-indigo-500 focus:ring-indigo-500" />
+          <!-- Shows the ID extracted from the URL, so the paste is verifiable. -->
+          <p id="sheet-id-hint" class="mt-1.5 text-xs text-slate-400"></p>
+        </div>
+
+        <div class="grid gap-5 sm:grid-cols-2">
+          <div>
+            <label for="sales-range" class="block text-sm font-medium text-slate-700">اسم ورقة المبيعات</label>
+            <input id="sales-range" name="salesRange" type="text" dir="ltr" placeholder="Sales"
+                   class="mt-1.5 block w-full rounded-lg border-slate-300 font-mono text-sm
+                          focus:border-indigo-500 focus:ring-indigo-500" />
+            <p class="mt-1.5 text-xs text-slate-400">كما هو في تبويبات Google Sheets تماماً.</p>
+          </div>
+          <div>
+            <label for="returns-range" class="block text-sm font-medium text-slate-700">اسم ورقة المرتجعات</label>
+            <input id="returns-range" name="returnsRange" type="text" dir="ltr" placeholder="Returns"
+                   class="mt-1.5 block w-full rounded-lg border-slate-300 font-mono text-sm
+                          focus:border-indigo-500 focus:ring-indigo-500" />
+            <p class="mt-1.5 text-xs text-slate-400">كما هو في تبويبات Google Sheets تماماً.</p>
+          </div>
+        </div>
+
+        <p id="read-hint" class="text-xs font-medium"></p>
+
+        <div class="flex flex-wrap items-center gap-3 border-t border-slate-100 pt-5">
+          <button type="submit"
+                  class="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm
+                         font-semibold text-white shadow-sm transition hover:bg-indigo-700
+                         focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">
+            حفظ إعدادات القراءة
+          </button>
+          <button type="button" id="btn-test-read"
+                  class="inline-flex items-center gap-2 rounded-lg bg-white px-4 py-2.5 text-sm
+                         font-semibold text-slate-800 shadow-sm ring-1 ring-inset ring-slate-300
+                         transition hover:bg-slate-50 focus:outline-none focus:ring-2
+                         focus:ring-indigo-500 focus:ring-offset-2">
+            اختبار قراءة الجدول
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <!-- ===================== WRITE: Apps Script (optional) ============== -->
+    <section class="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <h1 class="text-lg font-semibold">الكتابة إلى الجدول (اختياري)</h1>
+      <p class="mt-1 text-sm text-slate-500">
+        هذه الخطوة اختيارية: زر <strong>نسخ جاهز للصق</strong> في لوحة التحكم يتيح لك التسعير
+        ولصق النتائج يدوياً دون نشر أي تطبيق ويب. أكمل هذا الحقل فقط إذا أردت أن يكتب
+        التطبيق مباشرةً عبر <span class="font-mono text-xs">Apps Script</span>.
+      </p>
+
+      <form id="form-config" class="mt-6 space-y-5" novalidate>
+
+        <div>
+          <label for="web-app-url" class="block text-sm font-medium text-slate-700">
+            رابط تطبيق الويب الخاص بـ Google Apps Script
+          </label>
+          <input id="web-app-url" name="webAppUrl" type="url" spellcheck="false"
+                 autocomplete="off" placeholder="https://script.google.com/macros/s/AKfycbXXXX/exec"
+                 dir="ltr"
+                 class="mt-1.5 block w-full rounded-lg border-slate-300 font-mono text-sm
+                        placeholder:font-sans placeholder:text-slate-400
+                        focus:border-indigo-500 focus:ring-indigo-500" />
+          <p id="url-hint" class="mt-1.5 text-xs text-slate-400"></p>
+        </div>
+
+        <h2 class="text-sm font-semibold">خيارات إضافية</h2>
+
+        <!-- Currency + batch size -->
+        <div class="grid gap-5 sm:grid-cols-2">
+          <div>
+            <label for="currency" class="block text-sm font-medium text-slate-700">عملة العرض</label>
+            <input id="currency" name="currency" type="text" maxlength="3" placeholder="USD" dir="ltr"
+                   class="mt-1.5 block w-full rounded-lg border-slate-300 font-mono text-sm uppercase
+                          focus:border-indigo-500 focus:ring-indigo-500" />
+            <p class="mt-1.5 text-xs text-slate-400">أي رمز ISO من ثلاثة أحرف. يؤثر على العرض فقط.</p>
+          </div>
+
+          <div>
+            <label for="batch-size" class="block text-sm font-medium text-slate-700">عدد الصفوف في كل طلب</label>
+            <input id="batch-size" name="batchSize" type="number" min="1" max="500" step="1"
+                   class="mt-1.5 block w-full rounded-lg border-slate-300 text-sm
+                          focus:border-indigo-500 focus:ring-indigo-500" />
+            <p class="mt-1.5 text-xs text-slate-400">أبقِ القيمة عند 500 أو أقل لتتم الكتابة في الجدول مرة واحدة.</p>
+          </div>
+        </div>
+
+        <!-- Buttons -->
+        <div class="flex flex-wrap items-center gap-3 border-t border-slate-100 pt-5">
+          <button type="submit"
+                  class="inline-flex items-center gap-2 rounded-lg bg-slate-700 px-4 py-2.5 text-sm
+                         font-semibold text-white shadow-sm transition hover:bg-slate-800
+                         focus:outline-none focus:ring-2 focus:ring-slate-500 focus:ring-offset-2">
+            حفظ إعدادات الكتابة
+          </button>
+
+          <!-- ms-auto is the RTL-aware equivalent of ml-auto. -->
+          <button type="button" id="btn-clear"
+                  class="ms-auto text-sm font-semibold text-slate-400 transition hover:text-rose-600">
+            إعادة الضبط للإعدادات الافتراضية
+          </button>
+        </div>
+      </form>
+    </section>
+
+    <!-- ============================ LAST TEST ============================ -->
+    <section class="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <h2 class="text-sm font-semibold">آخر عملية قراءة ناجحة</h2>
+      <dl class="mt-4 grid grid-cols-2 gap-x-6 gap-y-4 text-sm sm:grid-cols-4">
+        <div>
+          <dt class="text-xs tracking-wide text-slate-400">صفوف المبيعات</dt>
+          <dd id="count-sales" class="mt-0.5 font-semibold tabular-nums text-slate-900">—</dd>
+        </div>
+        <div>
+          <dt class="text-xs tracking-wide text-slate-400">صفوف المرتجعات</dt>
+          <dd id="count-returns" class="mt-0.5 font-semibold tabular-nums text-slate-900">—</dd>
+        </div>
+        <div>
+          <dt class="text-xs tracking-wide text-slate-400">طريقة النقل</dt>
+          <dd id="info-transport" class="mt-0.5 font-semibold text-slate-900">—</dd>
+        </div>
+        <div>
+          <dt class="text-xs tracking-wide text-slate-400">وقت الجدول</dt>
+          <dd id="info-time" class="mt-0.5 font-semibold text-slate-900">—</dd>
+        </div>
+      </dl>
+
+      <div class="mt-5 flex items-center gap-3 border-t border-slate-100 pt-5">
+        <span id="conn-badge"
+              class="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1
+                     text-xs font-semibold text-slate-600 ring-1 ring-inset ring-slate-200"
+              data-state="idle">لم يتم الاختبار بعد</span>
+        <span id="test-detail" class="text-xs text-slate-400">احفظ رابط مشاركة الجدول أولاً، ثم اختبر القراءة.</span>
+      </div>
+    </section>
+
+    <!-- ============================ LAST TEST ============================ -->
+    <section class="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <h2 class="text-sm font-semibold">آخر عملية قراءة ناجحة</h2>
+      <dl class="mt-4 grid grid-cols-2 gap-x-6 gap-y-4 text-sm sm:grid-cols-4">
+        <div>
+          <dt class="text-xs tracking-wide text-slate-400">صفوف المبيعات</dt>
+          <dd id="count-sales" class="mt-0.5 font-semibold tabular-nums text-slate-900">—</dd>
+        </div>
+        <div>
+          <dt class="text-xs tracking-wide text-slate-400">صفوف المرتجعات</dt>
+          <dd id="count-returns" class="mt-0.5 font-semibold tabular-nums text-slate-900">—</dd>
+        </div>
+        <div>
+          <dt class="text-xs tracking-wide text-slate-400">طريقة النقل</dt>
+          <dd id="info-transport" class="mt-0.5 font-semibold text-slate-900">—</dd>
+        </div>
+        <div>
+          <dt class="text-xs tracking-wide text-slate-400">وقت الجدول</dt>
+          <dd id="info-time" class="mt-0.5 font-semibold text-slate-900">—</dd>
+        </div>
+      </dl>
+    </section>
+
+    <!-- ============================ QUICK SETUP ========================== -->
+    <section class="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <h2 class="text-sm font-semibold">إعداد سريع</h2>
+      <ol class="mt-4 space-y-4 text-sm text-slate-600">
+        <li class="flex gap-3">
+          <span class="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-slate-100 text-xs font-bold text-slate-600">1</span>
+          <span>
+            في Google Sheet الخاص بك، أنشئ ورقتين باسمَي
+            <code class="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">Sales</code> و
+            <code class="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">Returns</code>.
+            <span class="block text-xs text-slate-400">
+              تُكتب أسماء الأعمدة بالإنجليزية لأنها عقد برمجي مع التطبيق والسكربت.
+            </span>
+            <span class="block text-xs text-slate-400" dir="ltr" style="text-align:right">
+              Sales &rarr; Order_ID, Product_SKU, Quantity, Unit_Price &nbsp;·&nbsp;
+              Returns &rarr; Return_ID, Order_ID, Product_SKU, Returned_Qty, Calculated_Value, Status
+            </span>
+            <span class="block text-xs text-slate-400">
+              لست مضطراً لاستخدام هذه الأسماء بالضبط. التطبيق يفهم عدة بدائل شائعة — <span class="font-mono" dir="ltr">Sales order</span> بدل
+              <span class="font-mono" dir="ltr">Order_ID</span>،
+              و<span class="font-mono" dir="ltr">Item</span> بدل
+              <span class="font-mono" dir="ltr">Product_SKU</span>،
+              و<span class="font-mono" dir="ltr">Quantity</span> بدل
+              <span class="font-mono" dir="ltr">Returned_Qty</span> في ورقة
+              <span class="font-mono" dir="ltr">Returns</span>.
+              لكن <span class="font-mono" dir="ltr">Return_ID</span> مطلوبة: بدونها
+              لا يمكن حفظ النتائج ولا نسخها.
+            </span>
+          </span>
+        </li>
+        <li class="flex gap-3">
+          <span class="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-slate-100 text-xs font-bold text-slate-600">2</span>
+          <span>
+            شارك الجدول: <span class="font-medium">مشاركة ← anyone with the link ← Viewer</span>.
+            هذه الخطوة إلزامية — بدونها سيرفض التطبيق القراءة.
+          </span>
+        </li>
+        <li class="flex gap-3">
+          <span class="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-slate-100 text-xs font-bold text-slate-600">3</span>
+          <span>
+            انسخ رابط الجدول من شريط عنوان المتصفح (Ctrl+L) والصقه في حقل
+            <strong>رابط جدول Google Sheets</strong> أعلاه — الرابط كاملاً، والتطبيق
+            يستخرج المعرّف تلقائياً.
+          </span>
+        </li>
+        <li class="flex gap-3">
+          <span class="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-slate-100 text-xs font-bold text-slate-600">4</span>
+          <span>اضغط <strong>اختبار قراءة الجدول</strong> للتأكد من أن القراءة تعمل.</span>
+        </li>
+        <li class="flex gap-3">
+          <span class="grid h-6 w-6 shrink-0 place-items-center rounded-full bg-slate-100 text-xs font-bold text-slate-600">5</span>
+          <span>
+            <span class="font-medium">اختياري — للكتابة المباشرة:</span>
+            افتح <span class="font-medium">الإضافات ← Apps Script</span>، الصق
+            <code class="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">google-script.gs</code>،
+            شغّل <code class="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs">setupSheets</code>،
+            ثم انشره كتطبيق ويب مع <em class="font-medium not-italic text-rose-600">تنفيذ كـ: أنا</em>
+            و<em class="font-medium not-italic text-rose-600">صلاحية: أي شخص</em>، والصق الرابط
+            المنتهي بـ <code class="font-mono text-xs">/exec</code> في قسم الكتابة أعلاه.
+            <span class="block text-xs text-slate-400">
+              دون ذلك يكفي أن تستخدم زر «نسخ جاهز للصق» في لوحة التحكم وتلصق النتائج يدوياً.
+            </span>
+          </span>
+        </li>
+      </ol>
+    </section>
+
+    <!-- ============================ TROUBLESHOOTING ====================== -->
+    <section class="mt-6 rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+      <h2 class="text-sm font-semibold">حل المشكلات</h2>
+      <dl class="mt-4 divide-y divide-slate-100 text-sm">
+        <div class="grid gap-1 py-3 sm:grid-cols-[14rem_1fr] sm:gap-4">
+          <dt class="font-medium text-slate-800">«تعذّر الوصول إلى Google Sheets»</dt>
+          <dd class="text-slate-600">السبب في الغالب واحد: الجدول <strong>ليس</strong> مشتركاً برابط «أي شخص لديه الرابط». افتح الجدول ← مشاركة ← <span class="font-mono text-xs" dir="ltr">anyone with the link</span> ← <strong>Viewer</strong>، ثم أعد المحاولة. تأكد أيضاً أن الرابط يشير إلى الجدول نفسه وليس إلى نسخة.</dd>
+        </div>
+        <div class="grid gap-1 py-3 sm:grid-cols-[14rem_1fr] sm:gap-4">
+          <dt class="font-medium text-slate-800">«الورقتان أعادتا نفس البيانات»</dt>
+          <dd class="text-slate-600">اسم إحدى الورقتين مكتوب خطأً. Google لا يُبلغ عن ذلك، بل يعرض الورقة الأولى بصمت — لذا يقارن التطبيق نتيجتي الورقتين ويحذّرك. صحّح الاسمين في الحقلين أعلاه.</dd>
+        </div>
+        <div class="grid gap-1 py-3 sm:grid-cols-[14rem_1fr] sm:gap-4">
+          <dt class="font-medium text-slate-800">«ورقة Returns لا تحتوي عمود Return_ID»</dt>
+          <dd class="text-slate-600">التسعير يعمل والأسعار تظهر، لكن لا يمكن حفظها ولا نسخها، لأن الحفظ يحتاج مفتاحاً فريداً لكل صف. أضف عمود <span class="font-mono text-xs" dir="ltr">Return_ID</span> في ورقة <span class="font-mono text-xs" dir="ltr">Returns</span> وضع به قيمة مختلفة لكل صف.</dd>
+        </div>
+        <div class="grid gap-1 py-3 sm:grid-cols-[14rem_1fr] sm:gap-4">
+          <dt class="font-medium text-slate-800">«خطأ في الشبكة أو CORS»</dt>
+          <dd class="text-slate-600">هذا خطأ قادم من نشر <strong>Apps Script</strong> للكتابة، وليس من القراءة. تأكد أن <em>صلاحية الوصول</em> في النشر هي <strong>أي شخص</strong>، أو استخدم زر النسخ بدل الكتابة المباشرة.</dd>
+        </div>
+        <div class="grid gap-1 py-3 sm:grid-cols-[14rem_1fr] sm:gap-4">
+          <dt class="font-medium text-slate-800">«لم يُرجع الخادم بيانات JSON»</dt>
+          <dd class="text-slate-600">على الأرجح لصقت رابط <strong>/dev</strong> أو رابط محرر السكربت. استخدم رابط <strong>/exec</strong> الظاهر في شاشة النشر.</dd>
+        </div>
+        <div class="grid gap-1 py-3 sm:grid-cols-[14rem_1fr] sm:gap-4">
+          <dt class="font-medium text-slate-800">«لا يوجد سجل بيع مطابق لـ …»</dt>
+          <dd class="text-slate-600">لا يوجد في ورقة <strong>Sales</strong> صف يطابق قيمة <strong>Order_ID</strong> مع <strong>Product_SKU</strong>. المطابقة تتجاهل حالة الأحرف والمسافات الزائدة، لكنها لا تتجاهل الأخطاء الإملائية.</dd>
+        </div>
+        <div class="grid gap-1 py-3 sm:grid-cols-[14rem_1fr] sm:gap-4">
+          <dt class="font-medium text-slate-800">صفحة فارغة / لا يتم تحميل أي شيء</dt>
+          <dd class="text-slate-600">لا يمكن تحميل وحدات ES من <code class="rounded bg-slate-100 px-1 py-0.5 font-mono text-xs" dir="ltr">file://</code>. قدّم المجلد عبر بروتوكول HTTP محلياً، أو استخدم رابط GitHub Pages مباشرة.</dd>
+        </div>
+      </dl>
+    </section>
+
+  </main>
+
+  <footer class="border-t border-slate-200 bg-white py-6">
+    <p class="text-center text-xs text-slate-400">تُحفظ الإعدادات لكل متصفح ولكل جهاز على حدة.</p>
+  </footer>
+
+  <!-- =====================================================================
+       TOAST HOST — see the matching block in index.html.
+       sm:end-0 / sm:items-end put the stack on the left edge under dir="rtl",
+       mirroring the English layout instead of covering the content.
+       ================================================================== -->
+  <div id="toast-notification"
+       class="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex flex-col items-center
+              gap-2 p-4 sm:inset-x-auto sm:end-0 sm:top-0 sm:items-end sm:p-6"
+       role="region"
+       aria-label="الإشعارات">
+  </div>
+
+  <!-- RESET CONFIRMATION MODAL — replaces window.confirm() on this page. -->
+  <div id="reset-confirm-modal"
+       class="fixed inset-0 z-50 hidden flex items-center justify-center p-4"
+       role="dialog"
+       aria-modal="true"
+       aria-labelledby="reset-confirm-title"
+       aria-hidden="true">
+
+    <div class="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" aria-hidden="true"></div>
+
+    <div data-modal-panel
+         class="relative w-full max-w-md transform rounded-2xl bg-white p-6 shadow-2xl
+                ring-1 ring-slate-900/5 transition duration-200 ease-out">
+
+      <div class="flex items-start gap-4">
+        <span class="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-rose-50 text-lg"
+              aria-hidden="true">&#9888;&#65039;</span>
+
+        <div class="min-w-0 flex-1">
+          <h2 id="reset-confirm-title" data-confirm-title
+              class="text-base font-semibold text-slate-900">
+            إعادة ضبط جميع الإعدادات؟
+          </h2>
+          <p data-confirm-message class="mt-2 text-sm text-slate-600">
+            سيؤدي هذا إلى مسح رابط تطبيق الويب المحفوظ.
+          </p>
+          <p data-confirm-detail
+             class="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-sm font-medium text-slate-700"></p>
+        </div>
+      </div>
+
+      <div class="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+        <!-- Cancel is focused by default; see the note in index.html. -->
+        <button type="button"
+                data-confirm-cancel
+                data-modal-autofocus
+                class="rounded-lg bg-white px-4 py-2.5 text-sm font-semibold text-slate-800
+                       shadow-sm ring-1 ring-inset ring-slate-300 transition hover:bg-slate-50
+                       focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2">
+          إلغاء
+        </button>
+        <button type="button"
+                data-confirm-accept
+                class="rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white
+                       shadow-sm transition hover:bg-rose-700 focus:outline-none
+                       focus:ring-2 focus:ring-rose-500 focus:ring-offset-2">
+          إعادة الضبط
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =====================================================================
+       PAGE LOGIC
+       ===================================================================== -->
+  <script type="module">
+    import {
+      loadConfig, saveConfig, clearConfig,
+      describeUrlProblem, describeShareLinkProblem, extractSpreadsheetId,
+      apiPing, apiFetchData, setBadge, setBusy, setText, byId, formatTimestamp,
+      confirmModal, closeModal, toast, toastSuccess, toastError, toastInfo,
+      toastWarning,
+    } from './app.js';
+
+    /** Where the reset-confirmation modal lives in the DOM. */
+    const RESET_MODAL_ID = 'reset-confirm-modal';
+
+    /* ---------------------------------------------------------------
+     * Load saved values into the form
+     * ------------------------------------------------------------- */
+    function paintForm(config) {
+      // Read settings. The field takes the full sheet URL; only the ID is kept.
+      byId('sheet-url').value = config.spreadsheetId
+        ? `https://docs.google.com/spreadsheets/d/${config.spreadsheetId}/edit`
+        : '';
+      byId('sales-range').value = config.salesRange || 'Sales';
+      byId('returns-range').value = config.returnsRange || 'Returns';
+
+      // Write + display settings
+      byId('web-app-url').value = config.webAppUrl || '';
+      byId('currency').value = config.currency || 'USD';
+      byId('batch-size').value = config.batchSize || 50;
+
+      validateUrl();
+      validateRead();
+    }
+
+    /**
+     * Show which ID the pasted URL resolves to.
+     *
+     * Pasting a URL is easy to get subtly wrong (a /copy link, a different
+     * sheet entirely), and the ID is what actually gets requested — so echoing
+     * it back turns a silent mistake into a visible one.
+     */
+    function validateSheetId() {
+      const hint = byId('sheet-id-hint');
+      const raw = byId('sheet-url').value.trim();
+
+      if (!raw) {
+        hint.className = 'mt-1.5 text-xs text-slate-400';
+        hint.textContent = 'انسخ الرابط من شريط عنوان Google Sheets والصقه هنا.';
+        return;
+      }
+
+      const id = extractSpreadsheetId(raw);
+      if (!id) {
+        hint.className = 'mt-1.5 text-xs font-medium text-amber-600';
+        hint.textContent = '⚠ لم أتمكن من التعرّف على معرّف الجدول. تأكد أن الرابط بصيغة https://docs.google.com/spreadsheets/d/<ID>/edit';
+        return;
+      }
+
+      hint.className = 'mt-1.5 text-xs text-slate-400';
+      hint.textContent = `✓ المعرّف: ${id}`;
+    }
+
+    /** Live hint for the read settings (sheet URL + tab names). */
+    function validateRead() {
+      const hint = byId('read-hint');
+      const config = readForm();
+
+      const problem = describeShareLinkProblem(config);
+      if (problem) {
+        hint.className = 'text-xs font-medium text-amber-600';
+        hint.textContent = `⚠ ${problem}`;
+      } else {
+        hint.className = 'text-xs font-medium text-emerald-600';
+        hint.textContent = '✓ إعدادات القراءة مكتملة — لا حاجة إلى مفتاح API. اضغط «اختبار قراءة الجدول» للتأكد.';
+      }
+    }
+
+    /**
+     * Read the read-settings out of the form, reducing the pasted URL to an ID.
+     * @return {!Object}
+     */
+    function readForm() {
+      return {
+        spreadsheetId: extractSpreadsheetId(byId('sheet-url').value),
+        salesRange: byId('sales-range').value.trim() || 'Sales',
+        returnsRange: byId('returns-range').value.trim() || 'Returns',
+      };
+    }
+
+    /** Live hint under the URL field. */
+    function validateUrl() {
+      const url = byId('web-app-url').value.trim();
+      const hint = byId('url-hint');
+
+      if (!url) {
+        hint.className = 'mt-1.5 text-xs text-slate-400';
+        hint.textContent = 'الصق الرابط من: النشر ← نشر جديد ← تطبيق ويب.';
+        return;
+      }
+
+      const problem = describeUrlProblem(url);
+      if (problem) {
+        hint.className = 'mt-1.5 text-xs font-medium text-amber-600';
+        hint.textContent = `⚠ ${problem}`;
+      } else {
+        hint.className = 'mt-1.5 text-xs font-medium text-emerald-600';
+        hint.textContent = '✓ يبدو رابط نشر ‎/exec‎ صالحاً.';
+      }
+    }
+
+    /* ---------------------------------------------------------------
+     * Save the read settings (share link + tab names)
+     * ------------------------------------------------------------- */
+    function handleSaveRead(event) {
+      event.preventDefault();
+
+      const patch = readForm();
+      const problem = describeShareLinkProblem(patch);
+      if (problem) {
+        setBadge('conn-badge', 'error', 'بيانات ناقصة');
+        toastError(problem, { title: 'تحقق من إعدادات القراءة' });
+        validateRead();
+        return;
+      }
+
+      const result = saveConfig(patch);
+      if (result.ok) {
+        state.config = result.config;
+        setBadge('conn-badge', 'success', 'تم الحفظ');
+        setText('test-detail', 'تم حفظ إعدادات القراءة. اضغط «اختبار قراءة الجدول» للتأكد.');
+        toastSuccess('تم حفظ إعدادات القراءة.', { title: 'تم الحفظ' });
+      } else {
+        setBadge('conn-badge', 'error', 'تعذّر الحفظ');
+        toastError(result.error || 'التخزين المحلي غير متاح.', { title: 'تعذّر الحفظ' });
+      }
+      validateRead();
+    }
+
+    /* ---------------------------------------------------------------
+     * Save the write + display settings
+     * ------------------------------------------------------------- */
+    function handleSave(event) {
+      event.preventDefault();
+
+      const batchSizeRaw = Number(byId('batch-size').value);
+      const batchSize = Number.isFinite(batchSizeRaw)
+        ? Math.min(500, Math.max(1, Math.round(batchSizeRaw)))
+        : 50;
+
+      const result = saveConfig({
+        webAppUrl: byId('web-app-url').value.trim(),
+        currency: (byId('currency').value.trim() || 'USD').toUpperCase(),
+        batchSize,
+      });
+
+      if (result.ok) {
+        state.config = result.config;
+        byId('batch-size').value = batchSize;
+        toastSuccess('تم حفظ إعدادات الكتابة في هذا المتصفح.', { title: 'تم الحفظ' });
+      } else {
+        setBadge('conn-badge', 'error', 'تعذّر الحفظ');
+        setText('test-detail', result.error || 'التخزين المحلي غير متاح.');
+        toastError(result.error || 'التخزين المحلي (localStorage) غير متاح في هذا المتصفح.',
+          { title: 'تعذّر حفظ الإعدادات' });
+      }
+    }
+
+    /* ---------------------------------------------------------------
+     * Test the read path (public share link)
+     *
+     * Two steps on purpose:
+     *   1. a cheap single-tab read proves the link and the sharing
+     *      permission are correct;
+     *   2. a full read then proves both tabs are reachable, that they are
+     *      actually *different* tabs, and gives us the row counts.
+     * ------------------------------------------------------------- */
+    async function handleTestRead() {
+      const config = { ...state.config, ...readForm() };
+
+      const problem = describeShareLinkProblem(config);
+      if (problem) {
+        setBadge('conn-badge', 'error', 'تعذّر الاختبار');
+        setText('test-detail', problem);
+        return;
+      }
+
+      setBusy('btn-test-read', true, 'جارٍ الاختبار…');
+      setBadge('conn-badge', 'working', 'جارٍ الفحص…');
+      setText('test-detail', 'جارٍ القراءة من رابط المشاركة…');
+
+      try {
+        // --- step 1: cheap single-tab read ------------------------------
+        // Reads one tab only, so a failure here points at the link or the
+        // sharing permission specifically.
+        await apiPing(config);
+        setBadge('conn-badge', 'working', 'تم الوصول');
+        setText('test-detail', 'نجح الفحص. جارٍ قراءة الورقتين…');
+
+        // --- step 2: full read ------------------------------------------
+        const data = await apiFetchData(config);
+        const warnings = data.warnings || [];
+
+        setBadge('conn-badge', warnings.length ? 'idle' : 'success',
+                 warnings.length ? 'متصل — مع ملاحظات' : 'متصل');
+        setText('test-detail', warnings.length
+          ? `تمت القراءة. ${warnings.length} ملاحظة — التفاصيل في سجل الصفحة الرئيسية.`
+          : 'تمت القراءة بنجاح من رابط المشاركة.');
+        setText('info-transport', 'رابط المشاركة');
+        setText('info-time', formatTimestamp(data.serverTime || new Date()));
+
+        setText('count-sales', data.sales.length);
+        setText('count-returns', data.returns.length);
+
+        if (warnings.length) {
+          toastWarning(warnings[0], { title: 'ملاحظة على الجدول' });
+        } else {
+          toastSuccess('تم الاتصال بالجدول.', { title: 'الاتصال يعمل' });
+        }
+      } catch (err) {
+        setBadge('conn-badge', 'error', 'فشل الاتصال');
+        setText('test-detail', err.message);
+        toastError(err.message, { title: 'فشل اختبار القراءة' });
+      } finally {
+        setBusy('btn-test-read', false, '', 'اختبار قراءة الجدول');
+      }
+    }
+
+    /* ---------------------------------------------------------------
+     * Reset
+     * ------------------------------------------------------------- */
+    async function handleClear() {
+      // Non-blocking confirmation, same pattern as the dashboard.
+      const confirmed = await confirmModal({
+        id: RESET_MODAL_ID,
+        title: 'إعادة ضبط جميع الإعدادات؟',
+        message: 'سيؤدي هذا إلى مسح رابط تطبيق الويب المحفوظ وإرجاع كل الإعدادات إلى قيمها الافتراضية.',
+        detail: 'ستحتاج إلى لصق رابط Apps Script مرة أخرى قبل جلب البيانات.',
+        confirmLabel: 'إعادة الضبط',
+        cancelLabel: 'إلغاء',
+        tone: 'danger',
+      });
+
+      if (!confirmed) {
+        toast('تم إلغاء إعادة الضبط. إعداداتك لم تتغير.', 'info');
+        return;
+      }
+
+      const config = clearConfig();
+      state.config = config;
+      paintForm(config);
+      setBadge('conn-badge', 'idle', 'تمت إعادة الضبط');
+      setText('test-detail', 'تم مسح جميع الإعدادات.');
+      setText('count-sales', '—');
+      setText('count-returns', '—');
+      setText('info-transport', '—');
+      setText('info-time', '—');
+      toast('تم مسح جميع الإعدادات.', 'info', { title: 'إعادة ضبط' });
+    }
+
+    /* ---------------------------------------------------------------
+     * Shared page state + wiring
+     * ------------------------------------------------------------- */
+    const state = { config: loadConfig() };
+
+    function init() {
+      paintForm(state.config);
+      validateSheetId();
+
+      if (!describeShareLinkProblem(state.config)) {
+        setText('test-detail', 'تم التحميل من الإعدادات المحفوظة. اضغط «اختبار قراءة الجدول» للتأكد.');
+      }
+
+      byId('form-read').addEventListener('submit', handleSaveRead);
+      byId('form-config').addEventListener('submit', handleSave);
+      byId('btn-test-read').addEventListener('click', handleTestRead);
+      byId('btn-clear').addEventListener('click', handleClear);
+
+      // Live validation as the user types.
+      byId('web-app-url').addEventListener('input', validateUrl);
+      byId('sheet-url').addEventListener('input', () => {
+        validateSheetId();
+        validateRead();
+      });
+      ['sales-range', 'returns-range'].forEach((id) => {
+        byId(id).addEventListener('input', validateRead);
+      });
+
+      // Backdrop click cancels the reset modal.
+      byId(RESET_MODAL_ID).addEventListener('click', (event) => {
+        if (event.target === event.currentTarget) closeModal(RESET_MODAL_ID);
+      });
+
+      // Unsaved edits should not let a test run against stale config.
+      byId('form-read').addEventListener('input', () => {
+        setBadge('conn-badge', 'idle', 'تغييرات غير محفوظة');
+      });
+    }
+
+    init();
+  </script>
+</body>
+</html>

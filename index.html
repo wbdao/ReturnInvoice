@@ -1,0 +1,979 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl" class="h-full bg-slate-50">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>نظام تسعير المرتجعات — لوحة التحكم</title>
+  <meta name="description" content="مطابقة المرتجعات مع سجلات المبيعات وتسعيرها تلقائياً." />
+
+  <!-- Tailwind CSS via CDN (Play CDN — fine for a small internal tool) -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            // Cairo covers Arabic; the Latin fallbacks keep SKU/ID columns
+            // legible for the Latin-script values they contain.
+            sans: ['Cairo', 'Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'sans-serif'],
+            mono: ['Cairo', 'ui-monospace', 'SFMono-Regular', 'Menlo', 'Consolas', 'monospace'],
+          },
+        },
+      },
+    };
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700&display=swap" rel="stylesheet" />
+
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>&#128260;</text></svg>" />
+</head>
+
+<body class="h-full font-sans text-slate-800 antialiased">
+
+  <!-- ============================== NAVBAR ============================== -->
+  <header class="sticky top-0 z-20 border-b border-slate-200 bg-white/90 backdrop-blur">
+    <div class="mx-auto flex h-16 max-w-7xl items-center justify-between px-4 sm:px-6">
+      <a href="./index.html" class="flex items-center gap-3">
+        <span class="grid h-9 w-9 place-items-center rounded-lg bg-indigo-600 text-lg font-bold text-white shadow-sm">م</span>
+        <span class="text-base font-semibold tracking-tight">نظام تسعير المرتجعات</span>
+      </a>
+
+      <nav class="flex items-center gap-1 text-sm font-medium">
+        <a href="./index.html"
+           class="rounded-lg bg-slate-100 px-3 py-2 text-slate-900"
+           aria-current="page">المرتجعات</a>
+        <a href="./settings.html"
+           class="rounded-lg px-3 py-2 text-slate-600 transition hover:bg-slate-100 hover:text-slate-900">الإعدادات</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-7xl px-4 py-8 sm:px-6">
+
+    <!-- ====================== SETUP WARNING (hidden by default) ========= -->
+    <div id="no-config-banner"
+         class="mb-6 hidden rounded-xl border border-amber-200 bg-amber-50 p-4">
+      <div class="flex items-start gap-3">
+        <span class="mt-0.5 text-lg">&#9888;&#65039;</span>
+        <div class="flex-1 text-sm text-amber-900">
+          <p class="font-semibold">لم يتم إعداد بيانات الاتصال</p>
+          <p class="mt-1">
+            انسخ رابط جدول Google Sheets (من شريط عنوان المتصفح) والصقه في صفحة الإعدادات. لا حاجة إلى مفتاح API — يكفي أن يكون الجدول مشتركاً برابط «أي شخص لديه الرابط».
+            <a href="./settings.html" class="font-semibold underline underline-offset-2">فتح الإعدادات</a>
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================== TOOLBAR =========================== -->
+    <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+
+      <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+
+        <!-- Start side (right in RTL): the three-step pipeline -->
+        <div class="flex flex-wrap items-center gap-3">
+          <button id="btn-fetch"
+                  class="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm
+                         font-semibold text-white shadow-sm transition hover:bg-indigo-700
+                         focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2
+                         disabled:cursor-not-allowed disabled:opacity-50">
+            ١ · جلب البيانات
+          </button>
+
+          <span class="text-slate-300" aria-hidden="true">&larr;</span>
+
+          <button id="btn-process"
+                  class="inline-flex items-center gap-2 rounded-lg bg-white px-4 py-2.5 text-sm
+                         font-semibold text-slate-800 shadow-sm ring-1 ring-inset ring-slate-300
+                         transition hover:bg-slate-50 focus:outline-none focus:ring-2
+                         focus:ring-indigo-500 focus:ring-offset-2
+                         disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled>
+            ٢ · معالجة وتسعير المرتجعات
+          </button>
+
+          <span class="text-slate-300" aria-hidden="true">&larr;</span>
+
+          <button id="btn-execute"
+                  class="inline-flex items-center gap-2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm
+                         font-semibold text-white shadow-sm transition hover:bg-emerald-700
+                         focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2
+                         disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled>
+            ٣ · تنفيذ المرتجعات
+          </button>
+        </div>
+
+        <!-- End side (left in RTL): connection pill + sync timestamp -->
+        <div class="flex items-center gap-4">
+          <span id="conn-badge" class="inline-flex items-center gap-2 rounded-full bg-slate-100 px-3 py-1
+                                       text-xs font-semibold text-slate-600 ring-1 ring-inset ring-slate-200"
+                data-state="idle">غير متصل</span>
+          <span id="last-sync" class="text-xs text-slate-400">لم تتم المزامنة بعد</span>
+        </div>
+      </div>
+
+      <!-- Options row -->
+      <div class="mt-5 flex flex-wrap items-center gap-5 border-t border-slate-100 pt-4">
+        <label class="inline-flex cursor-pointer items-center gap-2 text-sm text-slate-600">
+          <input id="opt-include-priced" type="checkbox"
+                 class="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-600" />
+          إعادة احتساب الصفوف المسعَّرة مسبقاً
+        </label>
+
+        <label class="inline-flex cursor-pointer items-center gap-2 text-sm text-slate-600">
+          <input id="opt-only-selected" type="checkbox"
+                 class="h-4 w-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-600" />
+          إخفاء الصفوف التي لم يُعثر لها على طلب
+        </label>
+
+        <!-- ms-auto / start-* are the RTL-aware equivalents of ml-auto / left-3,
+             so the search box keeps its margin and icon placement under dir="rtl". -->
+        <div class="relative ms-auto">
+          <input id="opt-search" type="search" placeholder="تصفية حسب الطلب / كود الصنف / اسم العميل…"
+                 class="w-64 rounded-lg border-slate-300 py-2 pe-9 ps-3 text-sm
+                        placeholder:text-slate-400 focus:border-indigo-500 focus:ring-indigo-500" />
+          <span class="pointer-events-none absolute end-3 top-2.5 text-sm text-slate-400">&#9906;</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ STAT CARDS ========================== -->
+    <section class="mt-6 grid grid-cols-2 gap-4 lg:grid-cols-5">
+
+      <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <p class="text-xs font-medium uppercase tracking-wide text-slate-400">المرتجعات</p>
+        <p id="stat-total" class="mt-1 text-2xl font-bold tabular-nums text-slate-900">—</p>
+      </div>
+
+      <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <p class="text-xs font-medium uppercase tracking-wide text-slate-400">تم تسعيرها</p>
+        <p id="stat-matched" class="mt-1 text-2xl font-bold tabular-nums text-emerald-600">—</p>
+        <p id="stat-matched-detail" class="mt-0.5 text-xs text-slate-400">—</p>
+      </div>
+
+      <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <p class="text-xs font-medium uppercase tracking-wide text-slate-400">غير موجودة</p>
+        <p id="stat-unmatched" class="mt-1 text-2xl font-bold tabular-nums text-amber-600">—</p>
+        <p id="stat-skipped" class="mt-0.5 text-xs text-slate-400">—</p>
+      </div>
+
+      <div class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <p class="text-xs font-medium uppercase tracking-wide text-slate-400">محدَّدة</p>
+        <p id="stat-selected" class="mt-1 text-2xl font-bold tabular-nums text-indigo-600">—</p>
+      </div>
+
+      <div class="col-span-2 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm lg:col-span-1">
+        <p class="text-xs font-medium uppercase tracking-wide text-slate-400">إجمالي القيمة</p>
+        <p id="stat-value" class="mt-1 text-2xl font-bold tabular-nums text-slate-900">—</p>
+        <p id="stat-selected-value" class="mt-0.5 text-xs text-slate-400">—</p>
+      </div>
+    </section>
+
+    <!-- ============================== TABLE ============================= -->
+    <!--
+      The thirteen columns below are RETURNS_LAYOUT in app.js, in the same
+      order, so the screen and the exported CSV are the same sheet. The header
+      is static markup on purpose — it is far easier to review and restyle than
+      one assembled in JavaScript — and `renderRowsHeader()` in app.js prints
+      exactly this markup if the layout ever changes.
+    -->
+    <section class="mt-6 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div class="flex items-center justify-between border-b border-slate-100 px-5 py-4">
+        <h2 class="text-sm font-semibold">المرتجعات المسعَّرة</h2>
+        <p id="table-note" class="text-xs text-slate-400">لم يتم تحميل أي بيانات بعد</p>
+      </div>
+
+      <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-slate-200 text-sm">
+          <!-- text-start is the RTL-aware form of text-left. -->
+          <thead class="bg-slate-50">
+            <tr class="text-start text-xs font-semibold tracking-wide text-slate-500">
+              <th scope="col" class="w-10 px-3 py-3"><span class="sr-only">تحديد</span></th>
+              <th scope="col" class="px-3 py-3">رقم الطلب</th>
+              <th scope="col" class="px-3 py-3">كود العميل</th>
+              <th scope="col" class="px-3 py-3">اسم العميل</th>
+              <th scope="col" class="px-3 py-3">كود الصنف</th>
+              <th scope="col" class="px-3 py-3">اسم الصنف</th>
+              <th scope="col" class="px-3 py-3">المقاس</th>
+              <th scope="col" class="px-3 py-3">اللون</th>
+              <th scope="col" class="px-3 py-3">المجموعة</th>
+              <th scope="col" class="px-3 py-3">الوحدة</th>
+              <th scope="col" class="px-3 py-3 text-start">الكمية المرتجعة</th>
+              <th scope="col" class="px-3 py-3 text-start">سعر الوحدة</th>
+              <th scope="col" class="px-3 py-3 text-start">القيمة الإجمالية</th>
+              <th scope="col" class="px-3 py-3">حالة التسعير</th>
+            </tr>
+          </thead>
+          <tbody id="rows-body" class="divide-y divide-slate-100"></tbody>
+        </table>
+      </div>
+
+      <div class="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 bg-slate-50 px-5 py-3">
+        <p class="text-xs text-slate-500">
+          زر <strong>تصدير المرتجعات المسعَّرة (CSV)</strong> ينتج الأعمدة الثلاثة عشر نفسها
+          وبالترتيب نفسه، فيمكن لصقها فوق ورقة
+          <span class="font-mono text-[11px]">Returns</span> أو استيرادها مباشرةً دون إعادة ترتيب.
+        </p>
+        <div class="flex flex-wrap items-center gap-3">
+          <button id="btn-select-all"
+                  class="text-xs font-semibold text-indigo-600 hover:text-indigo-500 disabled:opacity-40"
+                  disabled>تحديد الكل</button>
+          <button id="btn-select-none"
+                  class="text-xs font-semibold text-slate-500 hover:text-slate-700 disabled:opacity-40"
+                  disabled>إلغاء التحديد</button>
+          <!-- Exports the whole Returns tab as CSV: header row + one line per
+               return, in the sheet's own column order. This is the path that
+               needs no Apps Script deployment. -->
+          <button id="btn-export-csv"
+                  class="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-3 py-1.5 text-xs
+                         font-semibold text-white shadow-sm transition hover:bg-indigo-700
+                         focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2
+                         disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled>
+            <span aria-hidden="true">&#128229;</span>
+            تصدير المرتجعات المسعَّرة (CSV)
+          </button>
+          <!-- The same CSV, straight to the clipboard, for pasting. -->
+          <button id="btn-copy-csv"
+                  class="inline-flex items-center gap-1.5 rounded-lg bg-white px-2.5 py-1.5 text-xs
+                         font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-300
+                         transition hover:bg-slate-50 focus:outline-none focus:ring-2
+                         focus:ring-indigo-500 focus:ring-offset-2
+                         disabled:cursor-not-allowed disabled:opacity-40"
+                  disabled>
+            <span aria-hidden="true">&#128203;</span>
+            نسخ CSV
+          </button>
+          <!-- Filled in after an export; aria-live so it is announced. -->
+          <span id="export-hint" class="text-xs text-emerald-600" role="status" aria-live="polite"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================== LOG =============================== -->
+    <section class="mt-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+      <div class="flex items-center justify-between">
+        <h2 class="text-sm font-semibold">سجل العمليات</h2>
+        <button id="btn-clear-log" class="text-xs font-semibold text-slate-400 hover:text-slate-600">مسح</button>
+      </div>
+      <ul id="log" class="mt-3 max-h-56 space-y-1.5 overflow-y-auto font-mono text-xs text-slate-600"></ul>
+    </section>
+
+  </main>
+
+  <footer class="border-t border-slate-200 bg-white py-6">
+    <p class="text-center text-xs text-slate-400">
+      البيانات مخزَّنة في Google Sheets &mdash; القراءة تتم من رابط المشاركة مباشرةً بلا مفتاح API، والكتابة (إن توفّر رابط النشر) تتم عبر تطبيق الويب في Apps Script.
+    </p>
+  </footer>
+
+  <!-- =====================================================================
+       TOAST HOST
+       `toast()` in app.js appends transient notifications here and removes
+       them after their fade-out. aria-live lives on the container so screen
+       readers announce messages even though the nodes arrive late.
+       ===================================================================== -->
+  <div id="toast-notification"
+       class="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex flex-col items-center
+              gap-2 p-4 sm:inset-x-auto sm:end-0 sm:top-0 sm:items-end sm:p-6"
+       role="region"
+       aria-label="الإشعارات">
+  </div>
+
+  <!-- =====================================================================
+       EXECUTE CONFIRMATION MODAL
+       Replaces window.confirm(). `confirmModal()` in app.js fills in the
+       message and resolves a promise when the user picks an option, so the
+       event loop is never blocked.
+       ===================================================================== -->
+  <div id="execute-confirm-modal"
+       class="fixed inset-0 z-50 hidden flex items-center justify-center p-4"
+       role="dialog"
+       aria-modal="true"
+       aria-labelledby="execute-confirm-title"
+       aria-hidden="true">
+
+    <!-- Dimmed backdrop; clicking it cancels. -->
+    <div class="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" aria-hidden="true"></div>
+
+    <div data-modal-panel
+         class="relative w-full max-w-md transform rounded-2xl bg-white p-6 shadow-2xl
+                ring-1 ring-slate-900/5 transition duration-200 ease-out">
+
+      <div class="flex items-start gap-4">
+        <span class="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-amber-50 text-lg"
+              aria-hidden="true">&#9888;&#65039;</span>
+
+        <div class="min-w-0 flex-1">
+          <h2 id="execute-confirm-title" data-confirm-title
+              class="text-base font-semibold text-slate-900">
+            تأكيد الكتابة في Google Sheets
+          </h2>
+          <p data-confirm-message class="mt-2 text-sm text-slate-600">
+            أنت على وشك تحديث Google Sheets.
+          </p>
+          <p data-confirm-detail
+             class="mt-3 rounded-lg bg-slate-50 px-3 py-2 text-sm font-medium text-slate-700"></p>
+        </div>
+      </div>
+
+      <div class="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+        <!-- Cancel is focused by default: autofocusing the destructive
+             action means a stray Enter press would write to the sheet. -->
+        <button type="button"
+                data-confirm-cancel
+                data-modal-autofocus
+                class="rounded-lg bg-white px-4 py-2.5 text-sm font-semibold text-slate-800
+                       shadow-sm ring-1 ring-inset ring-slate-300 transition hover:bg-slate-50
+                       focus:outline-none focus:ring-2 focus:ring-slate-400 focus:ring-offset-2">
+          إلغاء
+        </button>
+        <button type="button"
+                data-confirm-accept
+                class="rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white
+                       shadow-sm transition hover:bg-rose-700 focus:outline-none
+                       focus:ring-2 focus:ring-rose-500 focus:ring-offset-2">
+          تأكيد والحفظ
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =====================================================================
+       PAGE LOGIC
+       The reusable pieces (config, transport, pricing, rendering) live in
+       app.js. This block only wires up the buttons and owns the in-memory
+       state for this page.
+       ===================================================================== -->
+  <script type="module">
+    import {
+      loadConfig, describeShareLinkProblem,
+      apiFetchData, apiUpdateReturns,
+      priceReturns, renderRows, setBadge, setBusy, setText, show, byId,
+      formatMoney, formatTimestamp, escapeHtml,
+      STATUS_PRICED, STATUS_NOT_FOUND,
+      confirmModal, closeModal, summarise,
+      buildReturnsCsv, csvText_, returnsLayout,
+      toast, toastSuccess, toastError, toastWarning, toastInfo,
+    } from './app.js';
+
+    /** Where the confirmation modal lives in the DOM. */
+    const CONFIRM_MODAL_ID = 'execute-confirm-modal';
+
+    /** The Returns tab, named in messages about exporting. */
+    const RETURN_SHEET = 'Returns';
+
+    /**
+     * transportLabel - how to name the read path in the UI.
+     *
+     * There is only one read transport, but this stays a function so the label
+     * lives in one place instead of being inlined at each call site.
+     *
+     * @param {string} transport
+     * @return {string}
+     */
+    function transportLabel(transport) {
+      return transport === 'share-link' ? 'رابط المشاركة' : 'HTTP';
+    }
+
+    /* ---------------------------------------------------------------
+     * In-memory state (never persisted — always re-derived from Sheets)
+     * ------------------------------------------------------------- */
+    const state = {
+      config: loadConfig(),
+      raw: { sales: [], returns: [] },   // straight from the sheet
+      rows: [],                          // priced view-model
+      processed: false,
+    };
+
+    /* ---------------------------------------------------------------
+     * Tiny activity log
+     * ------------------------------------------------------------- */
+    function log(message, tone = 'text-slate-600') {
+      const list = byId('log');
+      if (!list) return;
+
+      const li = document.createElement('li');
+      li.className = tone;
+      li.innerHTML = `<span class="text-slate-300">${escapeHtml(formatTimestamp(new Date()))}</span> ` +
+                     escapeHtml(message);
+      list.prepend(li);
+
+      // Keep the DOM bounded.
+      while (list.children.length > 80) list.lastElementChild.remove();
+    }
+
+    /* ---------------------------------------------------------------
+     * Rendering
+     * ------------------------------------------------------------- */
+    function render() {
+      const { currency } = state.config;
+
+      renderRows('rows-body', state.rows, {
+        currency,
+        filter: buildFilter(),
+        onToggle: (index, checked) => {
+          const row = state.rows.find((r) => r.index === index);
+          if (!row) return;
+          row.selected = checked;
+          paintStats();
+        },
+      });
+
+      paintStats();
+      paintSelectionButtons();
+    }
+
+    /** Combine the search box + "hide unmatched" toggle into one predicate. */
+    function buildFilter() {
+      const term = (byId('opt-search')?.value || '').trim().toLowerCase();
+      const hideUnmatched = byId('opt-only-selected')?.checked;
+
+      return (row) => {
+        // "Not found" is now a status rather than an error, so the filter keys
+        // off exactly what the checkbox advertises.
+        if (hideUnmatched && row.status === STATUS_NOT_FOUND) return false;
+        if (!term) return true;
+        return [row.orderId, row.sku, row.customerName, row.productName, row.status]
+          .some((field) => String(field || '').toLowerCase().includes(term));
+      };
+    }
+
+    function paintStats() {
+      const stats = state.rows.length ? summarise(state.rows) : null;
+
+      setText('stat-total', stats ? stats.total : '—');
+      setText('stat-matched', stats ? stats.matched : '—');
+      setText('stat-unmatched', stats ? stats.unmatched : '—');
+      setText('stat-selected', stats ? stats.selected : '—');
+      setText('stat-value', stats ? formatMoney(stats.totalValue, state.config.currency) : '—');
+      setText('stat-selected-value', stats
+        ? `${formatMoney(stats.selectedValue, state.config.currency)} المحدَّدة`
+        : '—');
+
+      // matched + unmatched + skipped always equals total, and showing the
+      // skipped remainder is what lets the three numbers be trusted.
+      setText('stat-skipped', stats && stats.skipped ? `${stats.skipped} مسجَّلة مسبقاً` : '');
+
+      // How the priced rows were matched. Worth separating because the two are
+      // not equally strong: an exact row matched order + SKU + Size + Color, a
+      // loose one only matched order + SKU and picked a price from what was
+      // there. Only shown when both kinds are present, so a clean run stays clean.
+      const detail = !stats || !stats.matched
+        ? ''
+        : stats.exact === 0
+          ? `${stats.matched} بكود الصنف فقط`
+          : stats.skuOnly === 0
+            ? `${stats.exact} مطابقة للمقاس واللون`
+            : `${stats.exact} مطابقة للمقاس واللون · ${stats.skuOnly} بكود الصنف فقط`;
+      setText('stat-matched-detail', detail);
+
+      setText('table-note', state.rows.length
+        ? `تم تسعير ${state.rows.length} مرتجع`
+        : 'لم يتم تحميل أي بيانات بعد');
+    }
+
+    function paintSelectionButtons() {
+      const hasRows = state.rows.length > 0;
+
+      byId('btn-select-all').disabled = !hasRows;
+      byId('btn-select-none').disabled = !hasRows;
+
+      // Exporting is the primary output, so it is available as soon as there is
+      // anything to export. Every row has a value: unmatched ones carry zeros
+      // plus a status, which is exactly what the CSV must contain.
+      byId('btn-export-csv').disabled = !hasRows;
+      byId('btn-copy-csv').disabled = !hasRows;
+
+      // Execute is the only step that needs the Apps Script deployment, and it
+      // matches rows by Return_ID rather than by position — so it additionally
+      // needs a key on at least one ticked row.
+      const ready = state.rows.some((r) => r.selected && r.returnId);
+      byId('btn-execute').disabled = !ready || !state.config.webAppUrl;
+    }
+
+    /* ---------------------------------------------------------------
+     * Step 1 — Fetch Data
+     *
+     * @param {{reprice?: boolean, quiet?: boolean}} [options]
+     *   reprice: re-run the pricing engine against the freshly read data
+     *   instead of clearing the table. Used after a write-back so the user
+     *   can see what actually landed in the sheet rather than an empty
+     *   table. Already-priced rows are included so the values stay visible.
+     *   quiet: suppress the success toast (the caller already reported it).
+     * ------------------------------------------------------------- */
+    async function handleFetch(options = {}) {
+      const reprice = options.reprice === true;
+      const quiet = options.quiet === true;
+
+      // Reads go through the public share link, so only that matters here.
+      const problem = describeShareLinkProblem(state.config);
+      if (problem) {
+        setBadge('conn-badge', 'error', 'غير مُهيّأ');
+        toastError(`تعذّر جلب البيانات: ${problem}`, { title: 'لا يوجد اتصال مُهيّأ' });
+        log(`تعذّر الجلب: ${problem}`, 'text-rose-600');
+        show('no-config-banner');
+        return;
+      }
+
+      setBusy('btn-fetch', true, 'جارٍ الجلب…');
+      setBadge('conn-badge', 'working', 'جارٍ الجلب…');
+      log(`قراءة رابط المشاركة · ${state.config.salesRange} + ${state.config.returnsRange}`);
+
+      try {
+        const data = await apiFetchData(state.config);
+        state.raw = { sales: data.sales, returns: data.returns };
+
+        if (reprice) {
+          const { rows } = priceReturns(state.raw, { includeAlreadyPriced: true });
+
+          // priceReturns() pre-ticks every priced row. After a write-back
+          // nothing should look pending, so clear the selection - this also
+          // keeps the Execute button disabled and prevents a duplicate write of
+          // the rows we just saved.
+          rows.forEach((row) => { row.selected = false; });
+
+          state.rows = rows;
+          state.processed = true;
+        } else {
+          state.rows = [];
+          state.processed = false;
+        }
+
+        setBadge('conn-badge', 'success', `متصل · ${transportLabel(data.transport)}`);
+        setText('last-sync', `تمت المزامنة ${formatTimestamp(new Date())}`);
+        byId('btn-process').disabled = false;
+
+        log(`تم استلام ${data.sales.length} صف مبيعات و${data.returns.length} صف مرتجعات عبر ${transportLabel(data.transport)}.`,
+            'text-emerald-600');
+
+        // The sheet was readable but may not have the columns the app needs.
+        // Surfaced as warnings rather than a failed read: prices often still
+        // compute, and the user needs to know exactly what is missing.
+        (data.warnings || []).forEach((message) => {
+          log(message, 'text-amber-600');
+        });
+
+        render();
+
+        if (!quiet) {
+          const warnings = data.warnings || [];
+          if (warnings.length) {
+            toastWarning(
+              'تمت قراءة الجدول، لكن هناك أعمدة ناقصة. راجع السجل أسفل الصفحة للتفاصيل.',
+              { title: 'بعض أعمدة الجدول غير موجودة' },
+            );
+            // The first warning is the actionable one; show it in full.
+            toastInfo(warnings[0], { title: 'تفاصيل' });
+          } else {
+            toastSuccess(
+              `تم تحميل ${data.sales.length} صف مبيعات و${data.returns.length} صف مرتجعات.`,
+              { title: 'تم جلب البيانات' },
+            );
+          }
+        }
+      } catch (err) {
+        setBadge('conn-badge', 'error', 'فشل الاتصال');
+        toastError(err.message, { title: 'تعذّر الوصول إلى الجدول' });
+        log(err.message, 'text-rose-600');
+      } finally {
+        setBusy('btn-fetch', false, '', '١ · جلب البيانات');
+      }
+    }
+
+    /* ---------------------------------------------------------------
+     * Step 2 — Process & Price Returns
+     * ------------------------------------------------------------- */
+    function handleProcess() {
+      if (!state.raw.returns.length) {
+        log('لا توجد صفوف مرتجعات محمَّلة — اضغط "جلب البيانات" أولاً.', 'text-amber-600');
+        return;
+      }
+
+      setBusy('btn-process', true, 'جارٍ التسعير…', '');
+
+      try {
+        const includeAlreadyPriced = byId('opt-include-priced')?.checked || false;
+        const { rows, stats } = priceReturns(state.raw, { includeAlreadyPriced });
+
+        state.rows = rows;
+        state.processed = true;
+
+        log(`تم تسعير ${stats.matched} من أصل ${stats.total} مرتجع ` +
+            `(${stats.exact} بمطابقة المقاس واللون، ${stats.skuOnly} بكود الصنف فقط) · ` +
+            `${stats.unmatched} صف "${STATUS_NOT_FOUND}" · ${stats.skipped} صف مسجَّل مسبقاً.`);
+
+        if (stats.matched > 0) {
+          toastSuccess(`تم تسعير ${stats.matched} من أصل ${stats.total} مرتجع.`,
+            { title: 'اكتمل التسعير' });
+        }
+        if (stats.unmatched > 0) {
+          toastWarning(
+            `${stats.unmatched} صف لم يُعثر على بيع لنفس الصنف لكود العميل في ورقة Sales، ` +
+            'فبقيت قيمته بصفر وحالته "صنف / طلب غير موجود".',
+            { title: 'صفوف بلا سعر مطابق' },
+          );
+        }
+
+        // A fresh pricing run invalidates whatever the last export produced, so
+        // the "copied" hint must not linger.
+        setText('export-hint', '');
+        render();
+      } finally {
+        setBusy('btn-process', false, '', '٢ · معالجة وتسعير المرتجعات');
+      }
+    }
+
+    /* ---------------------------------------------------------------
+     * Export the priced Returns tab
+     *
+     * The output is the sheet itself, not a report *about* it: the same
+     * thirteen columns, same order, same header names. Two ways out, because
+     * they suit different moments:
+     *
+     *   تصدير CSV -> a .csv file, for File > Import or as an attachment.
+     *   نسخ CSV   -> the clipboard, for pasting straight over the sheet.
+     *
+     * clipboard.writeText needs a secure context and a user gesture, and it is
+     * rejected on http:// origins other than localhost. The hidden textarea +
+     * execCommand path is the fallback for plain-http testing.
+     * ------------------------------------------------------------- */
+
+    /**
+     * exportScope - which rows an export should contain.
+     *
+     * A partial selection is honoured only when it is a genuine subset. Ticking
+     * everything, or ticking nothing, both mean "all of it" — because a row
+     * silently missing from an export is the failure mode that actually costs
+     * the user money.
+     *
+     * @return {{onlySelected: boolean, selected: !Set<number>}}
+     */
+    function exportScope() {
+      const selected = new Set(state.rows.filter((r) => r.selected).map((r) => r.index));
+      return { onlySelected: selected.size > 0 && selected.size < state.rows.length, selected };
+    }
+
+    /**
+     * exportFilename - a filename that sorts, and that survives every OS.
+     *
+     * Deliberately NOT formatTimestamp(): that renders in the Arabic UI locale,
+     * so the file arrived as `returns-priced-5-أكتوبر-2026،-01-53-م.csv` —
+     * Arabic script, an Arabic comma, and RTL marks in a name that a shell, a
+     * server or a ZIP archive may mangle. ISO-ish digits and dashes sort
+     * chronologically in Explorer and survive every upload form.
+     *
+     * @return {string}
+     */
+    function exportFilename() {
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}` +
+                    `-${pad(now.getHours())}${pad(now.getMinutes())}`;
+      return `returns-priced-${stamp}.csv`;
+    }
+
+    function handleExportCsv() {
+      if (!state.rows.length) {
+        toastWarning('لم تتم معالجة أي مرتجعات بعد.', { title: 'لا يوجد ما يُصدَّر' });
+        return;
+      }
+
+      const { onlySelected, selected } = exportScope();
+      const csv = csvText_(buildReturnsCsv(state.rows, { onlySelected, selected }));
+
+      try {
+        // Blob + object URL: no server, no library, works offline.
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = exportFilename();
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        // Revoked a beat later: revoking synchronously can cancel the download
+        // in some browsers before it has started reading the blob.
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (err) {
+        toastError('تعذّر إنشاء ملف CSV. استخدم زر «نسخ CSV» بدلاً منه.', {
+          title: 'فشل التصدير',
+        });
+        log(err.message, 'text-rose-600');
+        return;
+      }
+
+      const count = onlySelected ? `${selected.size} صف محدَّد` : `${state.rows.length} صف`;
+
+      setText('export-hint', `✓ تم تصدير ${count}`);
+      toastSuccess(
+        `تم تصدير ${count} إلى ملف CSV بالأعمدة الثلاثة عشر نفسها. ` +
+        'يمكن استيراده فوق ورقة Returns مباشرةً.',
+        { title: 'تم التصدير' },
+      );
+      log(`تم تصدير ${count} كملف CSV (${returnsLayout().length} عمود).`, 'text-emerald-600');
+    }
+
+    async function handleCopyCsv() {
+      if (!state.rows.length) {
+        toastWarning('لم تتم معالجة أي مرتجعات بعد.', { title: 'لا يوجد ما يُنسخ' });
+        return;
+      }
+
+      const { onlySelected, selected } = exportScope();
+      const csv = csvText_(buildReturnsCsv(state.rows, { onlySelected, selected }));
+      const ok = await copyText(csv);
+
+      const count = onlySelected ? `${selected.size} صف محدَّد` : `${state.rows.length} صف`;
+
+      if (ok) {
+        setText('export-hint', `✓ ${count} في الحافظة`);
+        toastSuccess(
+          `تم نسخ ${count}. الصقها في ورقة ${RETURN_SHEET} عند الخلية A1 — ` +
+          'الأعمدة الثلاثة عشر مطابقة لترتيب الأعمدة الحالية.',
+          { title: 'تم النسخ إلى الحافظة' },
+        );
+        log(`تم نسخ ${count} بصيغة CSV جاهزة للّصق.`, 'text-emerald-600');
+      } else {
+        setText('export-hint', '✗ فشل النسخ');
+        toastError('تعذّر النسخ إلى الحافظة. استخدم زر «تصدير CSV» لتنزيل الملف.', {
+          title: 'فشل النسخ',
+        });
+      }
+    }
+
+    /**
+     * copyText - write to the clipboard, with a fallback for non-secure origins.
+     * @param {string} text
+     * @return {!Promise<boolean>} whether it worked
+     */
+    async function copyText(text) {
+      if (navigator.clipboard?.writeText && window.isSecureContext) {
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch {
+          // fall through to the textarea path
+        }
+      }
+
+      try {
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        const ok = document.execCommand('copy');
+        area.remove();
+        return ok;
+      } catch {
+        return false;
+      }
+    }
+
+    /* ---------------------------------------------------------------
+     * Step 3 — Execute Returns  (writes back to the sheet via doPost)
+     *
+     * Optional. The CSV export covers the same ground with no deployment and
+     * no key column, so this exists for users who would rather write straight
+     * into the sheet. It matches rows by Return_ID rather than by position, so
+     * the Returns tab needs that column for this button to do anything.
+     * ------------------------------------------------------------- */
+    async function handleExecute() {
+      if (!state.config.webAppUrl) {
+        toastError(
+          'لا يوجد رابط نشر. زر «تصدير CSV» يؤدّي نفس المهمة دون حاجة إليه.',
+          { title: 'الكتابة المباشرة غير مهيّأة' },
+        );
+        return;
+      }
+
+      const missingKey = state.rows.filter((r) => r.selected && !r.returnId);
+      if (missingKey.length) {
+        toastError(
+          `${missingKey.length} صف محدَّد بلا Return_ID، فلا يمكن مطابقته بصف في الجدول. ` +
+          'استخدم «تصدير CSV» بدل ذلك، أو أضف عمود Return_ID.',
+          { title: 'ينقص عمود Return_ID' },
+        );
+        return;
+      }
+
+      // Build the payload from the currently ticked rows.
+      const selected = state.rows.filter((row) => row.selected && row.returnId);
+      const payload = selected.map((row) => ({
+        Return_ID: row.returnId,
+        Unit_Price: row.unitPrice,
+        Calculated_Value: row.calculatedValue,
+        Status: row.status || STATUS_PRICED,
+      }));
+
+      if (payload.length === 0) {
+        toastWarning('لم يتم تحديد أي صف — اختر الصفوف التي تريد حفظها في الجدول.', {
+          title: 'لم يتم تحديد صفوف',
+        });
+        log('لم يتم تحديد أي صف — اختر الصفوف التي تريد حفظها في الجدول.', 'text-amber-600');
+        return;
+      }
+
+      const total = payload.reduce((sum, row) => sum + (Number(row.Calculated_Value) || 0), 0);
+
+      // Non-blocking confirmation. The event loop keeps running while this
+      // promise is pending, so the page stays responsive and no handlers
+      // appear to detach.
+      const confirmed = await confirmModal({
+        id: CONFIRM_MODAL_ID,
+        title: 'تأكيد الكتابة في Google Sheets',
+        message: `أنت على وشك تحديث ${payload.length} عنصر في Google Sheets.`,
+        detail: `إجمالي القيمة: ${formatMoney(total, state.config.currency)}`,
+        confirmLabel: 'تأكيد والحفظ',
+        cancelLabel: 'إلغاء',
+        tone: 'danger',
+      });
+
+      if (!confirmed) {
+        toast('تم إلغاء العملية. لم يتم إرسال أي شيء إلى الجدول.', 'info');
+        return;
+      }
+
+      setBusy('btn-execute', true, 'جارٍ الحفظ…');
+      setBadge('conn-badge', 'working', 'جارٍ الحفظ…');
+      log(`POST ${payload.length} تحديث…`);
+
+      try {
+        const result = await apiUpdateReturns(state.config, payload, {
+          onProgress: (done, totalRows) => {
+            setBadge('conn-badge', 'working', `جارٍ الحفظ ${done}/${totalRows}`);
+          },
+        });
+
+        // Reflect the write locally so the table does not look stale, and
+        // untick the processed rows so they cannot be written twice.
+        const written = new Set(payload.map((row) => row.Return_ID));
+        state.rows.forEach((row) => {
+          if (!written.has(row.returnId)) return;
+          row.status = STATUS_PRICED;
+          row.selected = false;
+          row.calculatedValue = Math.round(row.returnedQty * row.unitPrice * 100) / 100;
+        });
+
+        const missing = result.notFound.length
+          ? ` ${result.notFound.length} قيمة Return_ID غير موجودة في الجدول: ${result.notFound.slice(0, 5).join('، ')}${result.notFound.length > 5 ? '…' : ''}`
+          : '';
+
+        setBadge('conn-badge', 'success', `تم تحديث ${result.updated} صف`);
+        log(`تم تحديث ${result.updated} صف في ${result.batches} دفعة.${missing}`,
+            'text-emerald-600');
+
+        toastSuccess(
+          `تم تحديث ${result.updated} صف بنجاح في Google Sheets.`,
+          { title: 'اكتملت العملية' },
+        );
+
+        if (result.notFound.length) {
+          toastWarning(
+            `${result.notFound.length} قيمة Return_ID غير موجودة في الجدول: ` +
+            result.notFound.slice(0, 5).join('، ') + (result.notFound.length > 5 ? '…' : ''),
+            { title: 'تم تخطي بعض الصفوف' },
+          );
+        }
+
+        render();
+
+        // Re-read so the table reflects what actually landed in the sheet,
+        // keeping the calculated values visible instead of blanking it.
+        // reprice clears the selection; quiet avoids a second toast on top
+        // of the write-complete one.
+        await handleFetch({ reprice: true, quiet: true });
+
+        if (result.updated < payload.length) {
+          toastWarning(
+            `تم طلب تحديث ${payload.length} صف، تمت كتابة ${result.updated} فقط. ` +
+            'حدِّث الصفحة وتحقق من الجدول.',
+            { title: 'كتابة جزئية' },
+          );
+        }
+      } catch (err) {
+        setBadge('conn-badge', 'error', 'فشلت الكتابة');
+        toastError(err.message, { title: 'تعذّرت الكتابة في Google Sheets' });
+        log(err.message, 'text-rose-600');
+      } finally {
+        setBusy('btn-execute', false, '', '٣ · تنفيذ المرتجعات');
+        // setBusy() clears .disabled, which would undo whatever
+        // paintSelectionButtons() decided (e.g. "nothing selected" after a
+        // write). Re-apply the real state now that the button is idle.
+        paintSelectionButtons();
+      }
+    }
+
+    /* ---------------------------------------------------------------
+     * Wiring
+     * ------------------------------------------------------------- */
+    function init() {
+      // Reflect saved settings on load. Reads need only the share link; the Apps
+      // Script URL is only needed for write-back, so it is not required here.
+      if (describeShareLinkProblem(state.config)) {
+        show('no-config-banner');
+      } else {
+        setBadge('conn-badge', 'idle', 'جاهز للجلب');
+      }
+
+      // Wrap: the click handler must not pass the Event as `options`.
+      byId('btn-fetch').addEventListener('click', () => handleFetch());
+      byId('btn-process').addEventListener('click', handleProcess);
+      byId('btn-execute').addEventListener('click', handleExecute);
+      byId('btn-export-csv').addEventListener('click', handleExportCsv);
+      byId('btn-copy-csv').addEventListener('click', handleCopyCsv);
+      byId('btn-clear-log').addEventListener('click', () => { byId('log').innerHTML = ''; });
+
+      // The backdrop of the confirm modal also cancels (click on the panel
+      // itself must not). confirmModal() covers this for its own buttons;
+      // this handler keeps the behaviour correct if the modal is ever
+      // opened directly via openModal().
+      byId(CONFIRM_MODAL_ID).addEventListener('click', (event) => {
+        if (event.target === event.currentTarget) closeModal(CONFIRM_MODAL_ID);
+      });
+
+      byId('opt-search').addEventListener('input', render);
+      byId('opt-only-selected').addEventListener('change', render);
+      byId('opt-include-priced').addEventListener('change', () => {
+        if (state.processed) handleProcess();   // re-price immediately
+      });
+
+      // Both bulk-selection buttons change what an export would contain, so
+      // the "27 صف في الحافظة" / "تم تصدير 27 صف" hint is no longer describing
+      // reality. Clear it here rather than letting it quietly mislead.
+      byId('btn-select-all').addEventListener('click', () => {
+        state.rows.forEach((row) => { row.selected = true; });
+        setText('export-hint', '');
+        render();
+      });
+
+      byId('btn-select-none').addEventListener('click', () => {
+        state.rows.forEach((row) => { row.selected = false; });
+        setText('export-hint', '');
+        render();
+      });
+
+      // A single checkbox does the same thing, so it clears the hint too.
+      // Re-rendering here is avoided on purpose: render() rebuilds the tbody,
+      // and the click that set the checkbox would then be racing a node that
+      // no longer exists.
+      byId('rows-body').addEventListener('change', (event) => {
+        if (!event.target.matches('input[data-row]')) return;
+        setText('export-hint', '');
+      });
+
+      render();
+      log(state.config.webAppUrl
+        ? 'جاهز. اضغط "١ · جلب البيانات" لسحب أحدث محتويات الجدول.'
+        : 'جاهز. اضغط "١ · جلب البيانات" — لا حاجة إلى رابط نشر ما دام التصدير إلى CSV يكفي.');
+    }
+
+    init();
+  </script>
+</body>
+</html>
