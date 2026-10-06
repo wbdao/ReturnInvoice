@@ -251,18 +251,21 @@ export const STATUS_LABELS = Object.freeze({
   Pending: 'قيد الانتظار',
 });
 
-/** Display label for a Status the app does not recognise: show it verbatim. */
-const STATUS_FALLBACK = 'حالة أخرى';
-
 /**
  * statusLabel - Arabic text for a Status value.
+ *
+ * The English "Priced" written by an earlier build reads as priced, matching
+ * isPriced(). Anything else unrecognised is shown verbatim, because the user
+ * typed it and a generic label would hide what it says.
+ *
  * @param {*} value
  * @return {string}
  */
 export function statusLabel(value) {
   const raw = String(value ?? '').trim();
-  if (!raw) return STATUS_LABELS.Pending;
-  return STATUS_LABELS[raw] || (STATUS_LABELS[raw.toLowerCase()] ?? raw) || STATUS_FALLBACK;
+  if (!raw || raw.toLowerCase() === 'pending') return STATUS_LABELS.Pending;
+  if (isPriced(raw)) return STATUS_PRICED;
+  return STATUS_LABELS[raw] || raw;
 }
 
 /**
@@ -604,19 +607,21 @@ export async function postJson(url, payload, { timeoutMs = DEFAULTS.timeoutMs } 
  * `#gid=12345` is a different, per-browser number). So it would put the user
  * back to copying opaque ids by hand.
  *
- * gviz's `out:javascript` hands us a ready-made callback: it evaluates
- * `google.visualization.Query.setResponse({...})`. Stubbing that one function
- * is the entire trick. The stub is installed immediately before the tag is
- * inserted and torn down immediately after, so it cannot leak into anything
- * else on the page.
+ * gviz's `responseHandler` option names the function the response calls, so
+ * every request gets its own uniquely named callback — exactly like
+ * jsonpRequest(). That matters because Sales and Returns are read in parallel:
+ * the default handler, `google.visualization.Query.setResponse`, is one global
+ * shared by both requests, and whichever response arrived first could be
+ * delivered to the other request's promise, silently swapping the two tabs.
  *
  * @param {!Object} config
  * @param {string} tab the tab (sheet) name, e.g. 'Returns'
  * @return {!Promise<!Object>} the gviz payload
  */
 function gvizRequest(config, tab) {
+  const callbackName = `__rpsGviz_${Date.now().toString(36)}_${jsonpSeq++}`;
   const url = buildUrl(`${gvizBase()}/${encodeURIComponent(cleanText(config.spreadsheetId))}/gviz/tq`, {
-    tqx: 'out:javascript',
+    tqx: `out:json;responseHandler:${callbackName}`,
     sheet: cleanText(tab),
     // `tq` is required by gviz even though the defaults are what we want.
     tq: 'select *',
@@ -627,32 +632,17 @@ function gvizRequest(config, tab) {
     let timer = null;
     let settled = false;
 
-    const hadGoogle = Object.prototype.hasOwnProperty.call(window, 'google');
-    const originalGoogle = window.google;
-    const originalViz = (originalGoogle && originalGoogle.visualization) || {};
-    const originalQuery = originalViz.Query || {};
-
     const cleanup = () => {
       if (timer) clearTimeout(timer);
+      delete window[callbackName];
       script.remove();
-      if (hadGoogle) window.google = originalGoogle;
-      else delete window.google;
     };
 
-    window.google = {
-      ...(originalGoogle || {}),
-      visualization: {
-        ...originalViz,
-        Query: {
-          ...originalQuery,
-          setResponse(payload) {
-            if (settled) return;
-            settled = true;
-            cleanup();
-            resolve(payload);
-          },
-        },
-      },
+    window[callbackName] = (payload) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(payload);
     };
 
     script.onerror = () => {
@@ -830,7 +820,9 @@ function missingColumns(rows, required) {
  *
  * @param {!Object} config
  * @return {!Promise<{sales: !Array, returns: !Array, transport: string,
- *                    serverTime: (string|undefined), warnings: !Array<string>}>}
+ *                    serverTime: (string|undefined),
+ *                    warnings: !Array<string>,
+ *                    problems: !Array<string>, notes: !Array<string>}>}
  */
 export async function apiFetchDataViaShareLink(config) {
   const salesTab = cleanText(config.salesRange) || SALES_TAB;
@@ -847,13 +839,13 @@ export async function apiFetchDataViaShareLink(config) {
   const salesRows = rowsToObjects(salesValues, 'Sales');
   const returnsRows = rowsToObjects(returnsValues, 'Returns');
 
-  const warnings = describeSchema_(salesRows, returnsRows);
+  const { problems, notes } = describeSchema_(salesRows, returnsRows);
 
   // gviz does not fail on an unknown tab name — it quietly serves the first
   // tab. That is the one way this transport can hand the user confidently
   // wrong data, so it is checked explicitly rather than assumed impossible.
   if (salesTab !== returnsTab && tabSignature_(salesValues) === tabSignature_(returnsValues)) {
-    warnings.push(
+    problems.push(
       `الورقتان "${salesTab}" و "${returnsTab}" أعادتا نفس البيانات. ` +
       'غالباً خطأ في اسم إحدى الورقتين — تحقّق من الأسماء كما هي في شريط تبويبات Google Sheets.',
     );
@@ -864,7 +856,13 @@ export async function apiFetchDataViaShareLink(config) {
     returns: returnsRows,
     transport: 'share-link',
     serverTime: new Date().toISOString(),
-    warnings,
+
+    // Everything worth saying about the read, in one flat list, so existing
+    // callers keep working. `problems` is broken out alongside it because it is
+    // the only half that means "your sheet is wrong" — see describeSchema_.
+    warnings: [...problems, ...notes],
+    problems,
+    notes,
   };
 }
 
@@ -880,16 +878,23 @@ export async function apiFetchDataViaShareLink(config) {
  * normal state of a fresh sheet, not a fault — and the descriptive columns only
  * affect how complete the table looks.
  *
+ * Returned in two lists, because "a column is missing" and "this sheet records
+ * negative quantities" are not the same message. Collapsing them into one array
+ * made the UI announce missing columns on every run of a perfectly complete
+ * sheet, purely because negative quantities were present. `problems` is the
+ * actionable half: something is absent and the user may want to fix it.
+ *
  * @param {!Array<!Object>} salesRows
  * @param {!Array<!Object>} returnsRows
- * @return {!Array<string>} Arabic messages, empty when nothing is missing
+ * @return {{problems: !Array<string>, notes: !Array<string>}}
  */
 function describeSchema_(salesRows, returnsRows) {
-  const warnings = [];
+  const problems = [];
+  const notes = [];
 
   const missingSales = missingColumns(salesRows, ['Product_SKU', 'Customer_Account', 'Unit_Price']);
   if (missingSales.size) {
-    warnings.push(
+    problems.push(
       `ورقة Sales لا تحتوي على: ${[...missingSales].join('، ')}. ` +
       'التسعير يعتمد على Item + Customer account، فبدونهما لن يُعثر على أي سعر.',
     );
@@ -897,7 +902,7 @@ function describeSchema_(salesRows, returnsRows) {
 
   const missingReturns = missingColumns(returnsRows, RETURNS_INPUT_COLUMNS);
   if (missingReturns.size) {
-    warnings.push(
+    problems.push(
       `ورقة Returns لا تحتوي على: ${[...missingReturns].join('، ')}. ` +
       'هذه هي الأعمدة الثلاثة التي يحتاجها التسعير — بدونها ستُعتبر كل الصفوف "صنف / طلب غير موجود". ' +
       'عمود Sales order مطلوب للعرض فقط ولا يدخل في البحث عن السعر.',
@@ -916,7 +921,7 @@ function describeSchema_(salesRows, returnsRows) {
     const names = [...missingDescriptive].map(
       (key) => RETURNS_LAYOUT.find((c) => c.key === key)?.sheet || key,
     );
-    warnings.push(
+    problems.push(
       `ورقة Returns لا تحتوي على: ${names.join('، ')}. ` +
       'التسعير يعمل بدونها، لكن الجدول سيظهر فارغاً في تلك الأعمدة.',
     );
@@ -930,13 +935,13 @@ function describeSchema_(salesRows, returnsRows) {
   }).length;
 
   if (negativeCount > 0) {
-    warnings.push(
+    notes.push(
       `${negativeCount} صف في ورقة ${RETURNS_TAB} يسجّل الكمية سالبة. ` +
       'تم احتساب الأسعار بالقيمة المطلقة (‎-2 تساوي 2).',
     );
   }
 
-  return warnings;
+  return { problems, notes };
 }
 
 /**
@@ -948,7 +953,9 @@ function describeSchema_(salesRows, returnsRows) {
  *
  * @param {!Object} config
  * @return {!Promise<{sales: !Array, returns: !Array, transport: string,
- *                    serverTime: (string|undefined), warnings: !Array<string>}>}
+ *                    serverTime: (string|undefined),
+ *                    warnings: !Array<string>,
+ *                    problems: !Array<string>, notes: !Array<string>}>}
  */
 export async function apiFetchData(config) {
   const problem = describeShareLinkProblem(config);
@@ -1042,22 +1049,161 @@ export async function apiPing(config) {
  * @return {string}
  */
 export function buildReturnsCsv(rows, { onlySelected = false, selected, header = true } = {}) {
-  const list = Array.isArray(rows) ? rows : [];
-  const wanted = onlySelected && selected
-    ? list.filter((r) => selected.has(r.index))
-    : list;
+  const list = exportRows_(rows, { onlySelected, selected });
 
   const lines = [];
 
   if (header) lines.push(RETURNS_LAYOUT.map((c) => csvCell(c.sheet)).join(','));
 
-  for (const row of wanted) {
+  for (const row of list) {
     // Skipped rows keep whatever the sheet already held, so re-exporting a
     // partially priced sheet does not wipe the rows it declined to touch.
     lines.push(RETURNS_LAYOUT.map((c) => csvCell(csvValueFor_(row, c.key))).join(','));
   }
 
   return lines.join('\r\n');
+}
+
+/**
+ * exportRows_ - the rows an export should contain, shared by every export format.
+ *
+ * Centralised so CSV, TSV and the HTML table can never drift: if each format
+ * filtered its own subset, a row could silently appear in the file and not in
+ * the pasted table, which is precisely the comparison the user makes to check
+ * the paste worked.
+ *
+ * @param {!Array<!Object>} rows
+ * @param {{onlySelected?: boolean, selected?: !Set<number>}} options
+ * @return {!Array<!Object>}
+ */
+function exportRows_(rows, { onlySelected = false, selected } = {}) {
+  const list = Array.isArray(rows) ? rows : [];
+  return onlySelected && selected ? list.filter((r) => selected.has(r.index)) : list;
+}
+
+/**
+ * buildReturnsTsv - the same thirteen columns, tab-separated.
+ *
+ * This is the plain-text half of "copy as an Excel table". Tab and newline are
+ * what a spreadsheet reads as "next column" and "next row", so a value carrying
+ * either would shift every column to its right and every row below it. That is
+ * the whole reason a CSV cell can hold a newline and a TSV cell cannot, so they
+ * are folded to a space here rather than escaped — there is no escape character
+ * in this format.
+ *
+ * Numbers go out as plain digits, never via toLocaleString: a thousands
+ * separator would split one number into two columns.
+ *
+ * Note there is no formula guard here, unlike csvCell(). That is deliberate
+ * rather than an oversight: quoting a CSV field is what defuses a leading `=`,
+ * and TSV has no quoting. But this flavour is only ever read by a plain-text
+ * target — a spreadsheet is handed buildReturnsHtmlTable(), where the value is
+ * inside a `<td>` and cannot be parsed as a formula at all. Falsifying a
+ * customer's name to defend against a consumer that is never reading it would
+ * be a pure loss.
+ *
+ * @param {!Array<!Object>} rows priced rows from priceReturns()
+ * @param {{onlySelected?: boolean, selected?: !Set<number>, header?: boolean}} [options]
+ * @return {string}
+ */
+export function buildReturnsTsv(rows, { onlySelected = false, selected, header = true } = {}) {
+  const list = exportRows_(rows, { onlySelected, selected });
+
+  const lines = [];
+
+  if (header) lines.push(RETURNS_LAYOUT.map((c) => tsvCell(c.sheet)).join('\t'));
+
+  for (const row of list) {
+    lines.push(RETURNS_LAYOUT.map((c) => tsvCell(csvValueFor_(row, c.key))).join('\t'));
+  }
+
+  return lines.join('\r\n');
+}
+
+/**
+ * tsvCell - one tab-separated field.
+ *
+ * @param {*} value
+ * @return {string}
+ */
+function tsvCell(value) {
+  if (value === null || value === undefined) return '';
+
+  const text = typeof value === 'number' ? String(value) : cleanText(value);
+
+  // Silent, and visible in the output: a product name typed across two lines in
+  // the sheet would otherwise push the whole rest of the table out of alignment.
+  return text.replace(/[\t\r\n]+/g, ' ');
+}
+
+/**
+ * buildReturnsHtmlTable - the same thirteen columns as a real HTML `<table>`.
+ *
+ * This is the flavour a spreadsheet actually reads. Excel, Google Sheets and
+ * LibreOffice all prefer `text/html` on the clipboard, so pasting it lands the
+ * data in thirteen properly-aligned columns *with* the header row styled —
+ * rather than one giant column, which is what pasting CSV text into a sheet
+ * produces when the locale separator disagrees with the file.
+ *
+ * Two properties make it safe to paste, and both matter:
+ *   - numbers stay numbers. The cell text is `959.04`, so the sheet parses a
+ *     number and the user's formulas keep working. No thousands separator, no
+ *     currency symbol, no RTL mark in front of the digits;
+ *   - text can never become a formula. A product named `=SUM(A1)` sits inside
+ *     a `<td>` as literal characters; the spreadsheet's text importer never sees
+ *     the leading `=` as cell input. That is the injection hole the CSV path
+ *     closes with quoting, closed here structurally instead.
+ *
+ * `dir="rtl"` on the table matches the app, and `dir="ltr"` on the numeric cells
+ * keeps digits from being reordered when the fragment is rendered in a browser
+ * (it has no effect on the spreadsheet import).
+ *
+ * @param {!Array<!Object>} rows priced rows from priceReturns()
+ * @param {{onlySelected?: boolean, selected?: !Set<number>, header?: boolean}} [options]
+ * @return {string}
+ */
+export function buildReturnsHtmlTable(rows, { onlySelected = false, selected, header = true } = {}) {
+  const list = exportRows_(rows, { onlySelected, selected });
+
+  // Inline styles only: Excel honours the attributes on a `<td>`, not a
+  // stylesheet, and a class would be dropped on paste.
+  const TH_BORDER = 'border:1px solid #c7d2fe;background:#eef2ff;font-weight:700;padding:4px 8px;';
+  const TD_BORDER = 'border:1px solid #e2e8f0;padding:4px 8px;';
+  const FONT = 'font-family:Calibri,Arial,sans-serif;font-size:11pt;';
+
+  const parts = [
+    '<table dir="rtl" style="border-collapse:collapse;' + FONT + '">',
+  ];
+
+  if (header) {
+    parts.push(
+      '<thead><tr>' +
+      RETURNS_LAYOUT.map((c) =>
+        `<th style="${TH_BORDER}">${escapeHtml(c.sheet)}</th>`).join('') +
+      '</tr></thead>',
+    );
+  }
+
+  if (list.length) {
+    parts.push('<tbody>');
+    for (const row of list) {
+      const cells = RETURNS_LAYOUT.map((c) => {
+        const value = csvValueFor_(row, c.key);
+        // Numeric *and* actually a number: a SKU is numeric in the layout but a
+        // product named "007" is not, and must not be read as 7.
+        const isNumber = c.numeric && typeof value === 'number' && Number.isFinite(value);
+        const text = value === null || value === undefined ? '' : String(value);
+        const dir = isNumber ? ' dir="ltr"' : '';
+        const style = isNumber ? 'text-align:left;' : '';
+        return `<td${dir} style="${TD_BORDER}${style}">${escapeHtml(text)}</td>`;
+      }).join('');
+      parts.push(`<tr>${cells}</tr>`);
+    }
+    parts.push('</tbody>');
+  }
+
+  parts.push('</table>');
+  return parts.join('');
 }
 
 /**
@@ -1072,7 +1218,8 @@ export function buildReturnsCsv(rows, { onlySelected = false, selected, header =
  */
 function csvValueFor_(row, key) {
   switch (key) {
-    // A skipped row was priced by an earlier run; report what it already has.
+    // A skipped row was priced by an earlier run; priceReturns() copied the
+    // sheet's existing values onto it, so this reports what it already has.
     case 'Unit_Price':
       return row.unitPrice ?? 0;
     case 'Calculated_Value':
@@ -1199,8 +1346,7 @@ export function toNumber(v) {
 /**
  * toDate - parse a Sales `Date` into a comparable number, or null.
  *
- * The sheet hands back ISO-8601 (`2023-06-12T21:00:00.000Z`), so the browser's
- * own parser handles it. Anything unparseable returns null and the line is then
+ * Accepts gviz's `Date(y,m,d)` strings, Date objects and ISO-8601 text. Anything unparseable returns null and the line is then
  * treated as undated rather than as the newest one — guessing a date would
  * silently reorder prices.
  *
@@ -1213,6 +1359,15 @@ export function toDate(v) {
 
   const text = cleanText(v);
   if (!text) return null;
+
+  // gviz's JSON output encodes a date cell as "Date(2023,5,12)" or
+  // "Date(2023,5,12,14,30,0)", with a 0-based month. Read as UTC, for the same
+  // reason as the bare ISO date below.
+  const gviz = /^Date\((\d+),(\d+),(\d+)(?:,(\d+),(\d+),(\d+))?\)$/.exec(text.replace(/\s+/g, ''));
+  if (gviz) {
+    const [, y, m, d, hh = 0, mm = 0, ss = 0] = gviz;
+    return Date.UTC(+y, +m, +d, +hh, +mm, +ss);
+  }
 
   // A bare "2023-06-12" is read as UTC midnight. Without the suffix Date parses
   // it as *local* midnight, which shifts the day for anyone east or west of UTC
@@ -1426,18 +1581,23 @@ export function pickSaleLine(lines, wanted) {
   // returned sale still counts as standing: only a fully returned one is skipped.
   const standing = byNewest.filter((l) => !l.returnedInFull);
   const chosen = standing.length ? standing : byNewest;
-  const steppedBack = chosen.length > 0 && chosen[0] !== byNewest[0];
+  const line = chosen.reduce((a, b) => (lineRank(b) < lineRank(a) ? b : a));
+
+  // Only the fully returned sales *newer* than the line actually used count as
+  // stepped over; older returned sales played no part in the choice.
+  const steppedOver = standing.length
+    ? byNewest.slice(0, byNewest.indexOf(line)).filter((l) => l.returnedInFull).length
+    : 0;
+  const steppedBack = steppedOver > 0;
 
   return {
-    line: chosen.reduce((a, b) => (lineRank(b) < lineRank(a) ? b : a)),
+    line,
     tier,
     candidates: list.length,
     usedWildcard,
     pool,
     steppedBack,
-    steppedOver: steppedBack
-      ? byNewest.slice(0, byNewest.length - chosen.length).length
-      : 0,
+    steppedOver,
 
     // Every sale for this item came back, so there is no "latest standing sale"
     // to speak of. The price is then the newest known one and nothing more, which
@@ -1506,17 +1666,22 @@ export function buildSalesIndex(sales) {
   //
   //   SO001434 / 1002389   +750 (2023-02-11)  -6 (2023-02-21)   -> 744, still stands
   //   SO013544 / 1002934   +1   (2023-06-12)  -3 (2023-06-12)   ->  -2, returned
+  //
+  // A line with no order number cannot be paired with anything, so it nets on
+  // its own. Grouping every order-less line under one blank order would let an
+  // unrelated return cancel out an unrelated sale.
   const netByOrder = new Map();
+  const orderKey = (key, line, i) => (line.orderId ? `${key}|${line.orderId}` : `${key}|#${i}`);
   for (const [key, lines] of byKey) {
-    for (const line of lines) {
+    lines.forEach((line, i) => {
       const q = line.quantity === null ? 0 : line.quantity;
-      const ok = `${key}|${line.orderId}`;
+      const ok = orderKey(key, line, i);
       netByOrder.set(ok, (netByOrder.get(ok) || 0) + q);
-    }
+    });
   }
   for (const [key, lines] of byKey) {
-    for (const line of lines) {
-      const net = netByOrder.get(`${key}|${line.orderId}`) ?? 0;
+    for (const [i, line] of lines.entries()) {
+      const net = netByOrder.get(orderKey(key, line, i)) ?? 0;
       // netQty is what remains of this order, i.e. the sale still stands.
       line.netQty = net;
       line.returnedInFull = net <= 0;
@@ -1636,6 +1801,10 @@ export function priceReturns(data, { includeAlreadyPriced = false } = {}) {
     // -- already priced? --------------------------------------------------
     if (!includeAlreadyPriced && isPriced(status)) {
       row.skipped = true;
+      // Carry the sheet's own figures through. Leaving the zero defaults here
+      // would make an export pasted over the sheet wipe out every earlier price.
+      row.unitPrice = toNumber(ret.Unit_Price) ?? 0;
+      row.calculatedValue = toNumber(ret.Calculated_Value) ?? 0;
       row.issues.push({
         level: 'info',
         message: `مسجَّل مسبقاً بحالة "${STATUS_PRICED}". فعّل خيار "إعادة احتساب الصفوف المسعَّرة مسبقاً" لإعادة التسعير.`,
@@ -1738,14 +1907,15 @@ export function priceReturns(data, { includeAlreadyPriced = false } = {}) {
     } else if (pick.steppedBack) {
       // The newest sale came back in full, so an earlier date supplied the price.
       // Worth stating plainly: the number is older than the most recent one and
-      // the user may otherwise expect the newer figure.
+      // the user may otherwise expect the newer figure. The date is the one the
+      // price was taken from, so it belongs to the fallback, not the returns.
       const when = sale.soldAt === null
         ? ''
         : ` بتاريخ ${new Date(sale.soldAt).toISOString().slice(0, 10)}`;
       row.issues.push({
         level: 'warn',
-        message: `أحدث ${formatQty(pick.steppedOver)} سجل بيع لهذا الصنف${when || ''} ` +
-                 'مرتجِع بالكامل، فتم الرجوع إلى تاريخ أقدم ' +
+        message: `أحدث ${formatQty(pick.steppedOver)} سجل بيع لهذا الصنف مرتجِع بالكامل، ` +
+                 `فتم الرجوع إلى بيع أقدم${when} ` +
                  `واعتماد السعر ${formatNumber(sale.unitPrice)}.`,
       });
     }

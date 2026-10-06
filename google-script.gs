@@ -26,7 +26,8 @@
  *   2. Extensions > Apps Script.
  *   3. Delete the placeholder "myFunction" code, paste this whole file in.
  *   4. Save (Ctrl+S), then run setupSheets once from the dropdown and
- *      authorise when prompted (it creates the Sales / Returns tabs).
+ *      authorise when prompted (it creates the Sales / Returns tabs, and
+ *      adds + fills the Return_ID column the write path matches on).
  *   5. Deploy > New deployment > type "Web app".
  *        - Execute as:      Me
  *        - Who has access:  Anyone            <-- IMPORTANT, see README
@@ -60,9 +61,12 @@ var CONFIG = {
   SALES_HEADERS: ['Sales order', 'Customer account', 'CSName', 'Date',
                   'Item', 'Name', 'Size', 'Color', 'Item group', 'Unit',
                   'Unit_Price', 'Quantity', 'Amount'],
+  // Return_ID is last on purpose: the app's 13-column CSV export is pasted at
+  // A1, and a key column after it is never overwritten by that paste.
   RETURNS_HEADERS: ['Sales order', 'Customer account', 'CSName',
                     'Item', 'Name', 'Size', 'Color', 'Item group', 'Unit',
-                    'Quantity', 'Unit_Price', 'Calculated_Value', 'Status'],
+                    'Quantity', 'Unit_Price', 'Calculated_Value', 'Status',
+                    'Return_ID'],
 
   // What applyUpdates_ needs to *find* on the Returns tab, which is a different
   // question from what the tab is *called*. Return_ID is not part of the user's
@@ -599,6 +603,12 @@ function setupSheets(forceHeaders) {
       .setValues(padRows_(demoReturns, CONFIG.RETURNS_HEADERS.length));
   }
 
+  // Runs after the demo seed so the demo rows get IDs too.
+  if (returnsSheet) {
+    var filled = ensureReturnIds_(returnsSheet);
+    if (filled) created.push(filled + ' Return_ID value(s) filled');
+  }
+
   var salesSheet = ss.getSheetByName(CONFIG.SALES_SHEET);
   if (salesSheet && salesSheet.getLastRow() < 2) {
     var demoSales = [
@@ -618,6 +628,54 @@ function setupSheets(forceHeaders) {
     message: 'Sheets ready: ' + created.join(', '),
     spreadsheetUrl: ss.getUrl()
   };
+}
+
+/**
+ * ensureReturnIds_ - make sure every Returns row has a unique Return_ID.
+ *
+ * The write path matches rows by this key, so a sheet without it can never be
+ * written to. An existing sheet that predates the column gets it appended after
+ * the last used column; blank cells are filled with R-1, R-2, … skipping any
+ * value already present. Existing IDs are never changed.
+ *
+ * @param {!GoogleApps.Spreadsheet.SpreadsheetSheet} sheet
+ * @return {number} how many IDs were written
+ */
+function ensureReturnIds_(sheet) {
+  var lastCol = Math.max(sheet.getLastColumn(), 1);
+  var header = sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+  var idCol = headerMap_(header, ['Return_ID']).Return_ID;
+
+  if (idCol === undefined) {
+    idCol = lastCol; // 0-based index of the next free column
+    sheet.getRange(1, idCol + 1).setValue('Return_ID').setFontWeight('bold');
+  }
+
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return 0;
+
+  var range = sheet.getRange(2, idCol + 1, lastRow - 1, 1);
+  var ids = range.getValues();
+  var rows = sheet.getRange(2, 1, lastRow - 1, Math.max(sheet.getLastColumn(), 1)).getValues();
+
+  var used = {};
+  for (var i = 0; i < ids.length; i++) {
+    var existing = cleanText_(ids[i][0]);
+    if (existing) used[existing] = true;
+  }
+
+  var next = 1;
+  var filled = 0;
+  for (var r = 0; r < ids.length; r++) {
+    if (cleanText_(ids[r][0]) || isBlankRow_(rows[r])) continue;
+    while (used['R-' + next]) next++;
+    ids[r][0] = 'R-' + next;
+    used['R-' + next] = true;
+    filled++;
+  }
+
+  if (filled) range.setValues(ids);
+  return filled;
 }
 
 /**

@@ -143,11 +143,12 @@ screenshot but break naive matching:
   paste artefact and ignored *for matching only* — the table and the CSV still
   show exactly what the sheet contains.
 
-> **No `Return_ID` is needed.** An earlier design keyed writes on a `Return_ID`
-> column, which meant a sheet without one could be priced but never saved. The
-> CSV export lines up positionally instead, so the key column is gone. `Return_ID`
-> is now only relevant to the optional Apps Script path, which matches by key
-> rather than by position.
+> **`Return_ID` is only needed for the optional Apps Script write path.** Reading,
+> pricing, the CSV export and the clipboard copy all work without it. Direct
+> write-back matches rows by key, so it needs a `Return_ID` column — placed
+> *after* `Status`, so pasting the 13-column export at A1 never overwrites it.
+> Running `setupSheets` (menu **1. Create / repair sheets**) adds the column if it
+> is missing and fills every blank cell with a unique `R-1`, `R-2`, …
 
 ---
 
@@ -194,9 +195,14 @@ If you skip Apps Script entirely, the CSV export does the whole job:
 
 1. اضغط **٢ · معالجة وتسعير المرتجعات**.
 2. اضغط **تصدير المرتجعات المسعَّرة (CSV)** to download the file, or
-   **نسخ CSV** to put the identical text on the clipboard.
+   **نسخ كجدول إكسل** to put the same thirteen columns on the clipboard as a
+   formatted table.
 3. Either way, paste at **A1** of the `Returns` tab, or use
    *File → Import → Upload* with separator set to comma.
+
+Both routes carry the identical numbers, and the clipboard button is the better
+one for a paste into Excel or Google Sheets — see
+[نسخ كجدول إكسل](#نسخ-كجدول-إكسل) below.
 
 The output is the sheet, not a report about it — the same thirteen columns in the
 same order, with the same header names, one line per return in the order it was
@@ -225,6 +231,45 @@ Four details matter, and each has a failure it prevents:
 > **Ticking is the export scope.** All rows are ticked by default. Unticking
 > *some* rows exports exactly those; unticking *all* of them exports all of them
 > again — a selection is never allowed to silently produce an empty file.
+
+> **Read-time notices come in two kinds.** A missing column (`problems`) means the
+> sheet is incomplete and something may need fixing. A data note (`notes`) means
+> only that a convention is in use — currently just negative quantities on
+> `Returns`. They are kept apart so a complete sheet never raises a false "some
+> columns are missing" alarm. On the sample sheet the only notice is the
+> negative-quantity one, shown as a plain note.
+
+### نسخ كجدول إكسل
+
+**نسخ كجدول إكسل** puts the same thirteen columns on the clipboard as a real
+table, which is the better route when the destination is a spreadsheet. Paste at
+**A1** and the data lands in thirteen aligned columns with a styled header row,
+and `Unit_Price` arrives as a *number* — so formulas referencing it keep working.
+
+Two flavours are written together, because the two halves of the request are
+different things:
+
+| Flavour | Read by | Why it is there |
+| --- | --- | --- |
+| `text/html` | Excel, Google Sheets, LibreOffice | A real `<table>` with a bold, filled header. Preferred on paste, so the result is a formatted table rather than one long column. |
+| `text/plain` | text editors, terminals, email | Tab-separated. What anything that is *not* a spreadsheet reads. |
+
+Two properties make it safe to paste:
+
+- **Numbers stay numbers.** Cell text is `959.04`, so the sheet parses a number.
+  No thousands separator, no currency symbol, no RTL mark in front of the digits.
+- **Text can never become a formula.** A product named `=SUM(A1:A9)` sits inside
+  a `<td>` as literal characters, so the spreadsheet's importer never reads it as
+  cell input. The CSV route closes the same hole by quoting instead; TSV has no
+  quoting, which is why it relies on the HTML flavour — a spreadsheet never sees
+  it.
+
+> **One caveat worth knowing.** A SKU that *looks* numeric (`1002735`) is written
+> as text, because a real product code must survive as a code. None of the 190
+> distinct SKUs in the sample sheet would change value if a spreadsheet read them
+> as numbers, so this is currently moot — but a code with a leading zero (`007`)
+> would lose it. The CSV export has the same property; neither format can override
+> a paste-target's own text-import setting.
 
 ---
 
@@ -275,13 +320,16 @@ itself instead of exporting.
    - **تصدير المرتجعات المسعَّرة (CSV)** ← ينزّل الأعمدة الثلاثة عشر نفسها
      وبالترتيب نفسه، فيُلصق فوق ورقة `Returns` عند A1 أو يُستورد مباشرةً. لا
      يحتاج Apps Script ولا عمود `Return_ID`، وهو المسار الموصى به.
-   - **نسخ CSV** ← نفس النص في الحافظة، للّصق مباشرةً.
+   - **نسخ كجدول إكسل** ← نفس الأعمدة في الحافظة كجدول منسّق، فيلصق في Excel
+     أو Google Sheets في ثلاثة عشر عموداً محاذياً مع صف عناوين ملوّن، والأرقام
+     كأرقام. التفاصيل في [نسخ كجدول إكسل](#نسخ-كجدول-إكسل).
    - **٣ · تنفيذ المرتجعات** ← (اختياري، إن كان رابط النشر مضبوطاً) تظهر نافذة
      تأكيد داخلية تعرض العدد والإجمالي، ثم تُكتب `Unit_Price` و
      `Calculated_Value` و `Status` في الجدول. تُعاد القراءة بعد الكتابة فترى ما
      وصل فعلياً، وتبقى القيم المحسوبة ظاهرة، ويُلغى التحديد حتى لا تُكتب الصفوف
      نفسها مرتين بالخطأ. هذا المسار وحده يحتاج عمود `Return_ID`، لأنه يطابق
-     الصفوف بالمفتاح لا بالترتيب.
+     الصفوف بالمفتاح لا بالترتيب — ويضيفه `setupSheets` تلقائياً. الصفوف
+     المسجَّلة مسبقاً بحالة «تم التسعير» لا تُرسل أبداً.
    - كل الصفوف محددة افتراضياً، بما فيها التي لم تُسعَّر — لأن التصدير يجب أن
      يعيد ورقة `Returns` كاملة. إلغاء تحديد جزء منها يصدّر ذلك الجزء فقط.
 
@@ -508,14 +556,15 @@ not subject to CORS:
 
 ```
 https://docs.google.com/spreadsheets/d/<SPREADSHEET_ID>/gviz/tq
-      ?tqx=out:javascript&sheet=<TAB_NAME>&tq=select%20*
+      ?tqx=out:json;responseHandler:<UNIQUE_CALLBACK>&sheet=<TAB_NAME>&tq=select%20*
 ```
 
-The response is not JSON — it is a callback invocation, which is the whole trick:
+The response is not JSON — it is a call to the callback named in `responseHandler`,
+which is the whole trick:
 
 ```js
 /*O_o*/
-google.visualization.Query.setResponse({
+__rpsGviz_lx2a_0({
   "status": "ok",
   "table": {
     "cols": [{ "id": "A", "label": "‎Sales order", "type": "string" },
@@ -526,9 +575,14 @@ google.visualization.Query.setResponse({
 });
 ```
 
-`gvizRequest()` installs a stub for `google.visualization.Query.setResponse`
-immediately before inserting the tag and removes it — along with the tag and any
-previous `window.google` — as soon as the response arrives, so nothing leaks.
+`gvizRequest()` gives every request its own uniquely named global callback and
+deletes it, along with the tag, as soon as the response arrives. The default
+handler (`google.visualization.Query.setResponse`) is deliberately not used: it is
+one global shared by the two parallel requests, so a response could be delivered
+to the other tab's promise and Sales and Returns would silently swap.
+
+Date cells arrive as strings like `"Date(2023,5,12)"` (0-based month);
+`toDate()` parses them.
 
 `gvizPayloadToValues()` then stitches `table.cols` and `table.rows` back into an
 array-of-arrays and `rowsToObjects()` maps the header row onto the contract names
@@ -620,9 +674,11 @@ and the confirm dialog appear in Arabic.
 | `Network/CORS error` on **تنفيذ المرتجعات** | Apps Script deployment access is not **Anyone**. Edit the deployment → new version — or just use **تصدير CSV**, which needs no deployment. |
 | `The server did not return JSON` / «لم يُرجع الخادم بيانات JSON» | Wrong write URL. Use the `/exec` deployment URL, not `/dev` or the editor link. |
 | `Request timed out` / «انتهت مهلة الطلب» | Apps Script cold start plus a big sheet. Raise the timeout, or check the script's execution log. |
-| `Return_ID … not found in the sheet` | The ID in your payload is not in column A of `Returns`. |
-| `No sale found for SO-5001 / SKU-RED-01` / «لا يوجد سجل بيع مطابق لـ …» | No matching `Sales` row. Matching ignores case and padding, not typos. |
-| **تصدير CSV** / **نسخ CSV** does nothing | Nothing has been processed yet — both stay disabled until step ٢ produces rows. |
+| `Return_ID … not found in the sheet` | The ID in your payload is not in the `Return_ID` column of `Returns`. Run **1. Create / repair sheets** to add or fill it. |
+| `Returns sheet is missing the Return_ID column` | Same fix: run **1. Create / repair sheets** once. |
+| «لا يوجد سجل بيع للصنف … للعميل …» | No `Sales` row with that `Item` + `Customer account`. Matching ignores case and padding, not typos. |
+| A row is «غير موجود» although the item is clearly in `Sales` | gviz types each column by its majority: in an `Item` or `Sales order` column that is mostly numbers, a code containing letters arrives **empty** (and vice versa). Select those columns in both tabs → Format → Number → **Plain text**. |
+| **تصدير CSV** / **نسخ كجدول إكسل** does nothing | Nothing has been processed yet — both stay disabled until step ٢ produces rows. |
 | Arabic text is mojibake after *File → Import* | The import dialog overrode the separator or the encoding. The file already carries a UTF-8 BOM; choose **comma** as the separator and let the encoding be detected. |
 | The pasted export shifted one column | It was pasted at A2, or into a sheet whose header row is not the thirteen columns above. The export includes its own header line, so it must land on **A1** of an empty tab — or use *File → Import*, which replaces the tab. |
 | A pasted value shows as `1,250.75 US$` instead of a number | That came from copying the *table* rather than the CSV. The CSV always writes raw numbers; display formatting is never exported. |

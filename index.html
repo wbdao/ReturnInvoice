@@ -235,16 +235,19 @@
             <span aria-hidden="true">&#128229;</span>
             تصدير المرتجعات المسعَّرة (CSV)
           </button>
-          <!-- The same CSV, straight to the clipboard, for pasting. -->
-          <button id="btn-copy-csv"
+          <!-- Puts a real, formatted table on the clipboard: a text/html
+               <table> that Excel and Google Sheets render as thirteen aligned
+               columns with a styled header, plus a tab-separated fallback for
+               anything that only reads plain text. -->
+          <button id="btn-copy-excel"
                   class="inline-flex items-center gap-1.5 rounded-lg bg-white px-2.5 py-1.5 text-xs
                          font-semibold text-slate-700 shadow-sm ring-1 ring-inset ring-slate-300
                          transition hover:bg-slate-50 focus:outline-none focus:ring-2
                          focus:ring-indigo-500 focus:ring-offset-2
                          disabled:cursor-not-allowed disabled:opacity-40"
                   disabled>
-            <span aria-hidden="true">&#128203;</span>
-            نسخ CSV
+            <span aria-hidden="true">&#128202;</span>
+            نسخ كجدول إكسل
           </button>
           <!-- Filled in after an export; aria-live so it is announced. -->
           <span id="export-hint" class="text-xs text-emerald-600" role="status" aria-live="polite"></span>
@@ -356,14 +359,12 @@
       STATUS_PRICED, STATUS_NOT_FOUND,
       confirmModal, closeModal, summarise,
       buildReturnsCsv, csvText_, returnsLayout,
+      buildReturnsTsv, buildReturnsHtmlTable,
       toast, toastSuccess, toastError, toastWarning, toastInfo,
     } from './app.js';
 
     /** Where the confirmation modal lives in the DOM. */
     const CONFIRM_MODAL_ID = 'execute-confirm-modal';
-
-    /** The Returns tab, named in messages about exporting. */
-    const RETURN_SHEET = 'Returns';
 
     /**
      * transportLabel - how to name the read path in the UI.
@@ -419,6 +420,7 @@
           if (!row) return;
           row.selected = checked;
           paintStats();
+          paintSelectionButtons();
         },
       });
 
@@ -485,12 +487,12 @@
       // anything to export. Every row has a value: unmatched ones carry zeros
       // plus a status, which is exactly what the CSV must contain.
       byId('btn-export-csv').disabled = !hasRows;
-      byId('btn-copy-csv').disabled = !hasRows;
+      byId('btn-copy-excel').disabled = !hasRows;
 
       // Execute is the only step that needs the Apps Script deployment, and it
       // matches rows by Return_ID rather than by position — so it additionally
       // needs a key on at least one ticked row.
-      const ready = state.rows.some((r) => r.selected && r.returnId);
+      const ready = state.rows.some((r) => r.selected && !r.skipped && r.returnId);
       byId('btn-execute').disabled = !ready || !state.config.webAppUrl;
     }
 
@@ -559,14 +561,24 @@
         render();
 
         if (!quiet) {
-          const warnings = data.warnings || [];
-          if (warnings.length) {
+          // Only `problems` means the sheet is missing something. Announcing
+          // missing columns on every read would be wrong whenever the only note
+          // is a convention like negative quantities — which is every read of
+          // this sheet.
+          const problems = data.problems || [];
+          const notes = data.notes || [];
+          if (problems.length) {
             toastWarning(
               'تمت قراءة الجدول، لكن هناك أعمدة ناقصة. راجع السجل أسفل الصفحة للتفاصيل.',
               { title: 'بعض أعمدة الجدول غير موجودة' },
             );
-            // The first warning is the actionable one; show it in full.
-            toastInfo(warnings[0], { title: 'تفاصيل' });
+            // The first problem is the actionable one; show it in full.
+            toastInfo(problems[0], { title: 'تفاصيل' });
+          } else if (notes.length) {
+            toastInfo(
+              `${notes[0]}${notes.length > 1 ? ` (${notes.length - 1} ملاحظة أخرى في السجل)` : ''}`,
+              { title: 'ملاحظات على الجدول' },
+            );
           } else {
             toastSuccess(
               `تم تحميل ${data.sales.length} صف مبيعات و${data.returns.length} صف مرتجعات.`,
@@ -633,12 +645,14 @@
      * thirteen columns, same order, same header names. Two ways out, because
      * they suit different moments:
      *
-     *   تصدير CSV -> a .csv file, for File > Import or as an attachment.
-     *   نسخ CSV   -> the clipboard, for pasting straight over the sheet.
+     *   تصدير CSV   -> a .csv file, for File > Import or as an attachment.
+     *   نسخ كجدول إكسل -> the clipboard, as a formatted table for pasting
+     *                     straight over the sheet.
      *
-     * clipboard.writeText needs a secure context and a user gesture, and it is
-     * rejected on http:// origins other than localhost. The hidden textarea +
-     * execCommand path is the fallback for plain-http testing.
+     * Both clipboard paths need a user gesture, and navigator.clipboard is
+     * unavailable on a plain-http origin that is not localhost — so
+     * copyRich() falls back to execCommand('copy') driven by a `copy` listener,
+     * which is the only way to get the text/html flavour out in that case.
      * ------------------------------------------------------------- */
 
     /**
@@ -698,7 +712,7 @@
         // in some browsers before it has started reading the blob.
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       } catch (err) {
-        toastError('تعذّر إنشاء ملف CSV. استخدم زر «نسخ CSV» بدلاً منه.', {
+        toastError('تعذّر إنشاء ملف CSV. استخدم زر «نسخ كجدول إكسل» بدلاً منه.', {
           title: 'فشل التصدير',
         });
         log(err.message, 'text-rose-600');
@@ -716,26 +730,43 @@
       log(`تم تصدير ${count} كملف CSV (${returnsLayout().length} عمود).`, 'text-emerald-600');
     }
 
-    async function handleCopyCsv() {
+    /**
+     * handleCopyExcel - put the priced returns on the clipboard as a table.
+     *
+     * Two flavours travel together, because the two halves of the request are
+     * different things and neither can express the other:
+     *
+     *   text/html   a real <table>. Excel and Google Sheets prefer this on paste
+     *               and build thirteen aligned, styled columns from it, with
+     *               `959.04` parsed as a number rather than as text.
+     *   text/plain  tab-separated. What a text editor, a terminal or an email
+     *               client reads. A spreadsheet never sees this one, so there is
+     *               no quoting or formula guard to worry about in it.
+     */
+    async function handleCopyExcel() {
       if (!state.rows.length) {
         toastWarning('لم تتم معالجة أي مرتجعات بعد.', { title: 'لا يوجد ما يُنسخ' });
         return;
       }
 
       const { onlySelected, selected } = exportScope();
-      const csv = csvText_(buildReturnsCsv(state.rows, { onlySelected, selected }));
-      const ok = await copyText(csv);
+      const options = { onlySelected, selected };
+      const ok = await copyRich(
+        buildReturnsTsv(state.rows, options),
+        buildReturnsHtmlTable(state.rows, options),
+      );
 
       const count = onlySelected ? `${selected.size} صف محدَّد` : `${state.rows.length} صف`;
+      const cols = returnsLayout().length;
 
       if (ok) {
         setText('export-hint', `✓ ${count} في الحافظة`);
         toastSuccess(
-          `تم نسخ ${count}. الصقها في ورقة ${RETURN_SHEET} عند الخلية A1 — ` +
-          'الأعمدة الثلاثة عشر مطابقة لترتيب الأعمدة الحالية.',
+          `تم نسخ ${count} كجدول من ${cols} عموداً. الصقها في Excel أو ورقة Google ` +
+          `عند الخلية A1 — سيظهر الجدول منسّقاً بالأعمدة نفسها، والأرقام كأرقام.`,
           { title: 'تم النسخ إلى الحافظة' },
         );
-        log(`تم نسخ ${count} بصيغة CSV جاهزة للّصق.`, 'text-emerald-600');
+        log(`تم نسخ ${count} كجدول إكسل منسّق (${cols} عمود).`, 'text-emerald-600');
       } else {
         setText('export-hint', '✗ فشل النسخ');
         toastError('تعذّر النسخ إلى الحافظة. استخدم زر «تصدير CSV» لتنزيل الملف.', {
@@ -745,31 +776,71 @@
     }
 
     /**
-     * copyText - write to the clipboard, with a fallback for non-secure origins.
+     * copyRich - write two clipboard flavours at once.
+     *
+     * The two modern paths are tried in order of fidelity. Both can refuse: the
+     * async Clipboard API is unavailable on a plain-http origin that is not
+     * localhost, and ClipboardItem only exists in secure contexts.
+     *
+     * The third path is the old one, and it is the reason the HTML flavour
+     * survives at all: a one-shot `copy` listener can set `clipboardData`
+     * directly, so the table still reaches the clipboard even where
+     * navigator.clipboard is blocked. Falling back to a bare textarea would have
+     * silently downgraded every paste to tab-separated text.
+     *
      * @param {string} text
+     * @param {string} html
      * @return {!Promise<boolean>} whether it worked
      */
-    async function copyText(text) {
-      if (navigator.clipboard?.writeText && window.isSecureContext) {
+    async function copyRich(text, html) {
+      // -- modern: async Clipboard API, both flavours in one write -----------
+      if (navigator.clipboard?.write && window.ClipboardItem && window.isSecureContext) {
         try {
-          await navigator.clipboard.writeText(text);
+          await navigator.clipboard.write([new ClipboardItem({
+            'text/plain': new Blob([text], { type: 'text/plain' }),
+            'text/html': new Blob([html], { type: 'text/html' }),
+          })]);
           return true;
         } catch {
-          // fall through to the textarea path
+          // fall through
         }
       }
 
+      // -- legacy: execCommand, still able to carry the HTML -----------------
       try {
+        let carried = false;
+        const onCopy = (event) => {
+          if (!event.clipboardData) return;
+          event.clipboardData.setData('text/plain', text);
+          event.clipboardData.setData('text/html', html);
+          event.preventDefault();
+          carried = true;
+        };
+        document.addEventListener('copy', onCopy, { once: true });
+
+        // A selection has to exist for execCommand('copy') to fire at all, hence
+        // the throwaway textarea. readOnly stops iOS from offering to "correct"
+        // the value on its way past.
         const area = document.createElement('textarea');
         area.value = text;
         area.setAttribute('readonly', '');
         area.style.position = 'fixed';
+        area.style.top = '0';
         area.style.opacity = '0';
         document.body.appendChild(area);
         area.select();
-        const ok = document.execCommand('copy');
-        area.remove();
-        return ok;
+
+        let ok = false;
+        try {
+          ok = document.execCommand('copy');
+        } finally {
+          area.remove();
+          document.removeEventListener('copy', onCopy);
+        }
+
+        // `ok` with no data set means the copy event never fired, so nothing was
+        // written — reporting success there would be a lie.
+        return ok && carried;
       } catch {
         return false;
       }
@@ -792,7 +863,11 @@
         return;
       }
 
-      const missingKey = state.rows.filter((r) => r.selected && !r.returnId);
+      // Skipped rows were priced by an earlier run; the sheet already holds
+      // their values, so writing them again could only do harm.
+      const toWrite = state.rows.filter((r) => r.selected && !r.skipped);
+
+      const missingKey = toWrite.filter((r) => !r.returnId);
       if (missingKey.length) {
         toastError(
           `${missingKey.length} صف محدَّد بلا Return_ID، فلا يمكن مطابقته بصف في الجدول. ` +
@@ -803,8 +878,7 @@
       }
 
       // Build the payload from the currently ticked rows.
-      const selected = state.rows.filter((row) => row.selected && row.returnId);
-      const payload = selected.map((row) => ({
+      const payload = toWrite.map((row) => ({
         Return_ID: row.returnId,
         Unit_Price: row.unitPrice,
         Calculated_Value: row.calculatedValue,
@@ -850,14 +924,11 @@
           },
         });
 
-        // Reflect the write locally so the table does not look stale, and
-        // untick the processed rows so they cannot be written twice.
+        // Untick the written rows so they cannot be written twice. Their values
+        // and status are already exactly what was sent, so nothing else changes.
         const written = new Set(payload.map((row) => row.Return_ID));
         state.rows.forEach((row) => {
-          if (!written.has(row.returnId)) return;
-          row.status = STATUS_PRICED;
-          row.selected = false;
-          row.calculatedValue = Math.round(row.returnedQty * row.unitPrice * 100) / 100;
+          if (written.has(row.returnId)) row.selected = false;
         });
 
         const missing = result.notFound.length
@@ -926,7 +997,7 @@
       byId('btn-process').addEventListener('click', handleProcess);
       byId('btn-execute').addEventListener('click', handleExecute);
       byId('btn-export-csv').addEventListener('click', handleExportCsv);
-      byId('btn-copy-csv').addEventListener('click', handleCopyCsv);
+      byId('btn-copy-excel').addEventListener('click', handleCopyExcel);
       byId('btn-clear-log').addEventListener('click', () => { byId('log').innerHTML = ''; });
 
       // The backdrop of the confirm modal also cancels (click on the panel
