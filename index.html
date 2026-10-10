@@ -384,7 +384,7 @@
      * ------------------------------------------------------------- */
     const state = {
       config: loadConfig(),
-      raw: { sales: [], returns: [] },   // straight from the sheet
+      raw: { sales: [], returns: [], priceList: [] },   // straight from the sheet
       rows: [],                          // priced view-model
       processed: false,
     };
@@ -470,7 +470,8 @@
           : stats.skuOnly === 0
             ? `${stats.exact} مطابقة للمقاس واللون`
             : `${stats.exact} مطابقة للمقاس واللون · ${stats.skuOnly} بكود الصنف فقط`;
-      setText('stat-matched-detail', detail);
+      setText('stat-matched-detail',
+        detail + (stats && stats.converted ? ` · ${stats.converted} محوَّل الوحدة` : ''));
 
       setText('table-note', state.rows.length
         ? `تم تسعير ${state.rows.length} مرتجع`
@@ -526,7 +527,7 @@
 
       try {
         const data = await apiFetchData(state.config);
-        state.raw = { sales: data.sales, returns: data.returns };
+        state.raw = { sales: data.sales, returns: data.returns, priceList: data.priceList || [] };
 
         if (reprice) {
           const { rows } = priceReturns(state.raw, { includeAlreadyPriced: true });
@@ -548,7 +549,9 @@
         setText('last-sync', `تمت المزامنة ${formatTimestamp(new Date())}`);
         byId('btn-process').disabled = false;
 
-        log(`تم استلام ${data.sales.length} صف مبيعات و${data.returns.length} صف مرتجعات عبر ${transportLabel(data.transport)}.`,
+        log(`تم استلام ${data.sales.length} صف مبيعات و${data.returns.length} صف مرتجعات` +
+            (data.priceList?.length ? ` و${data.priceList.length} صف من قائمة الأسعار` : '') +
+            ` عبر ${transportLabel(data.transport)}.`,
             'text-emerald-600');
 
         // The sheet was readable but may not have the columns the app needs.
@@ -615,7 +618,16 @@
 
         log(`تم تسعير ${stats.matched} من أصل ${stats.total} مرتجع ` +
             `(${stats.exact} بمطابقة المقاس واللون، ${stats.skuOnly} بكود الصنف فقط) · ` +
-            `${stats.unmatched} صف "${STATUS_NOT_FOUND}" · ${stats.skipped} صف مسجَّل مسبقاً.`);
+            `${stats.unmatched} صف "${STATUS_NOT_FOUND}" · ${stats.skipped} صف مسجَّل مسبقاً` +
+            (stats.converted ? ` · ${stats.converted} سعر محوَّل بين القطعة والكرتونة` : '') + '.');
+
+        if (stats.converted > 0) {
+          toastInfo(
+            `${stats.converted} مرتجع لا يوجد له بيع بنفس الوحدة، فحُوِّل سعره من الوحدة الأخرى ` +
+            'باستخدام العبوة في قائمة الأسعار. هذه الصفوف معلَّمة «محوَّل من …» في الجدول.',
+            { title: 'أسعار محوَّلة' },
+          );
+        }
 
         if (stats.matched > 0) {
           toastSuccess(`تم تسعير ${stats.matched} من أصل ${stats.total} مرتجع.`,

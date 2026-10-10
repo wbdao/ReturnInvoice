@@ -55,6 +55,15 @@ export const DEFAULTS = Object.freeze({
   salesRange: SALES_TAB,    // the *tab name*, exactly as shown in Sheets
   returnsRange: RETURNS_TAB,
 
+  // --- price list: the pack sizes (piece vs carton), optional --------------
+  // May live in a different spreadsheet. Read by gid when the pasted link has
+  // one, because a tab *name* can carry invisible characters (the real
+  // AgentDist tab is named with a leading kasra) that make a by-name read
+  // silently fall back to the first tab.
+  priceListId: '',
+  priceListGid: '',
+  priceListTab: 'AgentDist',
+
   // --- write path: still the Apps Script web app -------------------------
   webAppUrl: '',            // the /exec URL of the Apps Script web app
   currency: 'USD',
@@ -615,14 +624,19 @@ export async function postJson(url, payload, { timeoutMs = DEFAULTS.timeoutMs } 
  * delivered to the other request's promise, silently swapping the two tabs.
  *
  * @param {!Object} config
- * @param {string} tab the tab (sheet) name, e.g. 'Returns'
+ * @param {string} tab the tab (sheet) name, e.g. 'Returns'; also the label
+ *   used in error messages
+ * @param {{spreadsheetId?: string, gid?: string}} [source] read another
+ *   spreadsheet, and/or address the tab by gid instead of by name
  * @return {!Promise<!Object>} the gviz payload
  */
-function gvizRequest(config, tab) {
+function gvizRequest(config, tab, source = {}) {
   const callbackName = `__rpsGviz_${Date.now().toString(36)}_${jsonpSeq++}`;
-  const url = buildUrl(`${gvizBase()}/${encodeURIComponent(cleanText(config.spreadsheetId))}/gviz/tq`, {
+  const id = cleanText(source.spreadsheetId) || cleanText(config.spreadsheetId);
+  const gid = cleanText(source.gid);
+  const url = buildUrl(`${gvizBase()}/${encodeURIComponent(id)}/gviz/tq`, {
     tqx: `out:json;responseHandler:${callbackName}`,
-    sheet: cleanText(tab),
+    ...(gid ? { gid } : { sheet: cleanText(tab) }),
     // `tq` is required by gviz even though the defaults are what we want.
     tq: 'select *',
   });
@@ -827,10 +841,18 @@ function missingColumns(rows, required) {
 export async function apiFetchDataViaShareLink(config) {
   const salesTab = cleanText(config.salesRange) || SALES_TAB;
   const returnsTab = cleanText(config.returnsRange) || RETURNS_TAB;
+  const priceTab = cleanText(config.priceListTab) || DEFAULTS.priceListTab;
+  const wantsPriceList = Boolean(cleanText(config.priceListId));
 
-  const [salesPayload, returnsPayload] = await Promise.all([
+  const [salesPayload, returnsPayload, pricePayload] = await Promise.all([
     gvizRequest(config, salesTab),
     gvizRequest(config, returnsTab),
+    // The price list only enables unit conversion, so a failure there must not
+    // cost the user the whole read: it is caught and reported instead.
+    wantsPriceList
+      ? gvizRequest(config, priceTab, { spreadsheetId: config.priceListId, gid: config.priceListGid })
+        .catch((err) => ({ __error: err }))
+      : null,
   ]);
 
   const salesValues = gvizPayloadToValues(salesPayload, salesTab);
@@ -840,6 +862,8 @@ export async function apiFetchDataViaShareLink(config) {
   const returnsRows = rowsToObjects(returnsValues, 'Returns');
 
   const { problems, notes } = describeSchema_(salesRows, returnsRows);
+
+  const priceRows = readPriceList_(pricePayload, priceTab, wantsPriceList, problems, notes);
 
   // gviz does not fail on an unknown tab name — it quietly serves the first
   // tab. That is the one way this transport can hand the user confidently
@@ -854,6 +878,7 @@ export async function apiFetchDataViaShareLink(config) {
   return {
     sales: salesRows,
     returns: returnsRows,
+    priceList: priceRows,
     transport: 'share-link',
     serverTime: new Date().toISOString(),
 
@@ -864,6 +889,54 @@ export async function apiFetchDataViaShareLink(config) {
     problems,
     notes,
   };
+}
+
+/**
+ * readPriceList_ - turn the price-list payload into rows, reporting any trouble.
+ *
+ * Every failure here degrades to "no conversion" rather than a failed read:
+ * same-unit pricing needs nothing from the price list. The column check also
+ * catches gviz's silent fallback to the first tab, because that tab will not
+ * have Unit and Price.
+ *
+ * @param {?Object} payload gviz payload, `{__error}` on failure, null if unset
+ * @param {string} tab
+ * @param {boolean} wanted whether a price list is configured at all
+ * @param {!Array<string>} problems appended to
+ * @param {!Array<string>} notes appended to
+ * @return {!Array<!Object>}
+ */
+function readPriceList_(payload, tab, wanted, problems, notes) {
+  const off = ' لن يُحوَّل السعر بين القطعة والكرتونة؛ تُسعَّر فقط المرتجعات التي لها بيع بنفس الوحدة.';
+
+  if (!wanted) {
+    notes.push('لم يُضبط رابط قائمة الأسعار (العبوات) في الإعدادات.' + off);
+    return [];
+  }
+  if (payload && payload.__error) {
+    problems.push(`تعذّرت قراءة قائمة الأسعار: ${payload.__error.message}` + off);
+    return [];
+  }
+
+  let rows;
+  try {
+    rows = rowsToObjects(gvizPayloadToValues(payload, tab), 'PriceList');
+  } catch (err) {
+    problems.push(`تعذّرت قراءة قائمة الأسعار: ${err.message}` + off);
+    return [];
+  }
+
+  const missing = missingColumns(rows, ['Product_SKU', 'Unit', 'Unit_Price']);
+  if (missing.size || !rows.length) {
+    problems.push(
+      'قائمة الأسعار لا تحتوي على الأعمدة Item و Unit و Price. ' +
+      'غالباً قُرئ تبويب آخر: الصق في الإعدادات رابط الجدول وأنت واقف على تبويب AgentDist ' +
+      '(حتى يحتوي الرابط على gid=…).' + off,
+    );
+    return [];
+  }
+
+  return rows;
 }
 
 /**
@@ -1405,10 +1478,147 @@ export function toDate(v) {
  * @return {string}
  */
 export function matchKey(sku, customerAccount) {
-  const norm = (v) => cleanText(v).toUpperCase()
+  return `${normId(sku)}|${normId(customerAccount)}`;
+}
+
+/** One identifier normalised for comparison; see matchKey(). */
+function normId(v) {
+  return cleanText(v).toUpperCase()
     .replace(/^['‘’ʻ]+/, '')
     .replace(/\s+/g, ' ');
-  return `${norm(sku)}|${norm(customerAccount)}`;
+}
+
+/**
+ * extractSpreadsheetGid - the tab id (`gid=…`) from a pasted sheet link.
+ *
+ * The gid is stable per tab and survives renames, which makes it the safer
+ * address when a tab name carries invisible characters.
+ *
+ * @param {*} input
+ * @return {string} the gid, or '' when the link has none
+ */
+export function extractSpreadsheetGid(input) {
+  const m = String(input ?? '').match(/[#?&]gid=(\d+)/);
+  return m ? m[1] : '';
+}
+
+/* ------------------------------------------------------------------ *
+ * Units and pack sizes
+ * ------------------------------------------------------------------ *
+ * An item can be sold by the piece and by the carton, at very different prices,
+ * so a return has to be priced from a sale in the *same* unit. Where none exists
+ * the price is converted through the pack size, which comes from the price list
+ * (AgentDist): pack size = carton price ÷ piece price.
+ *
+ * Units are reduced to two classes: 'carton', and 'base' for the unit a carton
+ * is made of. Sets (طقم) are 'base' too — the price list prices set items as
+ * طقم + كرتون the same way it prices other items as قطعة + كرتون.
+ * ------------------------------------------------------------------ */
+
+/**
+ * unitKey - the unit class of a Unit cell.
+ *
+ * Tolerant of spelling: قطعة/قطعه, كرتون/كرتونة/كرتونه, diacritics and tatweel,
+ * and the common Latin abbreviations. An unrecognised unit keeps its own
+ * normalised text, so it matches only itself and is never converted.
+ *
+ * @param {*} v
+ * @return {string} '' (blank) | 'base' | 'carton' | 'other:<text>'
+ */
+export function unitKey(v) {
+  const t = cleanText(v).toLowerCase()
+    .replace(/[ً-ْـ]/g, '')
+    .replace(/ة/g, 'ه')
+    .replace(/\s+/g, '');
+  if (!t) return '';
+  if (/كرتون|كرتنه|^(ctn|carton|cartons|box)$/.test(t)) return 'carton';
+  if (/قطع|طقم|^(pc|pcs|piece|pieces|set|sets|ea|each)$/.test(t)) return 'base';
+  return `other:${t}`;
+}
+
+/**
+ * unitsAgree - can a sale in unit `a` price a return in unit `b` directly?
+ * A blank on either side is a wildcard: there is nothing to disagree with.
+ */
+function unitsAgree(a, b) {
+  return !a || !b || a === b;
+}
+
+/**
+ * buildPackIndex - pack sizes (base units per carton) from the price list.
+ *
+ * The price list holds one row per item + size + colour + unit. Each variant's
+ * pack size is its carton price over its base price. In this data the ratio is
+ * the same for every variant of an item, so an item-level figure is kept as
+ * well, for sale lines whose size/colour the price list does not spell the
+ * same way.
+ *
+ * @param {!Array<!Object>} rows price-list rows (Product_SKU, Unit, Unit_Price, Size, Color)
+ * @return {!Map<string, {item: ?number, variants: !Map<string, number>}>}
+ */
+export function buildPackIndex(rows) {
+  const groups = new Map(); // sku -> Map(variant -> {base, carton})
+
+  for (const r of Array.isArray(rows) ? rows : []) {
+    const sku = normId(r && r.Product_SKU);
+    const price = toNumber(r && r.Unit_Price);
+    const unit = unitKey(r && r.Unit);
+    if (!sku || !(price > 0) || (unit !== 'base' && unit !== 'carton')) continue;
+
+    const v = variantKey(r.Size, r.Color);
+    const vk = `${v.size}|${v.color}`;
+    if (!groups.has(sku)) groups.set(sku, new Map());
+    const byVariant = groups.get(sku);
+    if (!byVariant.has(vk)) byVariant.set(vk, { base: null, carton: null });
+    const g = byVariant.get(vk);
+    // First price wins: the list repeats identical rows, and taking the first
+    // keeps the result stable if a later duplicate ever differs.
+    if (g[unit] === null) g[unit] = price;
+  }
+
+  const index = new Map();
+  for (const [sku, byVariant] of groups) {
+    const variants = new Map();
+    for (const [vk, g] of byVariant) {
+      if (g.base && g.carton) variants.set(vk, g.carton / g.base);
+    }
+    if (!variants.size) continue;
+
+    const factors = [...new Set([...variants.values()].map((f) => f.toFixed(6)))];
+    index.set(sku, { item: factors.length === 1 ? [...variants.values()][0] : null, variants });
+  }
+  return index;
+}
+
+/**
+ * packFactor - base units per carton for one item, or null when unknown.
+ * Tries the exact size/colour first, then the item-wide figure.
+ *
+ * @param {!Map} index from buildPackIndex()
+ * @return {?number}
+ */
+export function packFactor(index, sku, size, color) {
+  const entry = index && index.get(normId(sku));
+  if (!entry) return null;
+  const v = variantKey(size, color);
+  return entry.variants.get(`${v.size}|${v.color}`) ?? entry.item;
+}
+
+/**
+ * convertPrice - a unit price restated in another unit, or null if impossible.
+ * @param {?number} price
+ * @param {string} from unit class of the price
+ * @param {string} to unit class wanted
+ * @param {?number} factor base units per carton
+ * @return {?number}
+ */
+function convertPrice(price, from, to, factor) {
+  if (price === null || price === undefined) return null;
+  if (unitsAgree(from, to)) return price;
+  if (!(factor > 0)) return null;
+  if (from === 'carton' && to === 'base') return price / factor;
+  if (from === 'base' && to === 'carton') return price * factor;
+  return null;
 }
 
 /**
@@ -1616,9 +1826,10 @@ export function pickSaleLine(lines, wanted) {
  * pricing a return off whichever sale happened to be written first.
  *
  * @param {!Array<!Object>} sales
+ * @param {!Map} [pack] from buildPackIndex(); enables unit-aware netting
  * @return {{byKey: !Map<string, !Array<!Object>>, rows: number}}
  */
-export function buildSalesIndex(sales) {
+export function buildSalesIndex(sales, pack = new Map()) {
   const byKey = new Map();
   const rows = Array.isArray(sales) ? sales : [];
 
@@ -1651,6 +1862,11 @@ export function buildSalesIndex(sales) {
       color: cleanText(sale.Color),
       itemGroup: cleanText(sale.Item_Group),
       unit: cleanText(sale.Unit),
+
+      // Unit class and pack size, so a return is priced from a sale in its own
+      // unit and a piece is never charged at the carton price.
+      unitClass: unitKey(sale.Unit),
+      factor: packFactor(pack, sale.Product_SKU, sale.Size, sale.Color),
     };
 
     if (!byKey.has(key)) byKey.set(key, []);
@@ -1674,7 +1890,10 @@ export function buildSalesIndex(sales) {
   const orderKey = (key, line, i) => (line.orderId ? `${key}|${line.orderId}` : `${key}|#${i}`);
   for (const [key, lines] of byKey) {
     lines.forEach((line, i) => {
-      const q = line.quantity === null ? 0 : line.quantity;
+      // Netted in base units: one carton sold and six pieces returned is not
+      // 1 − 6. Without a pack size the raw count is the best available.
+      const raw = line.quantity === null ? 0 : line.quantity;
+      const q = line.unitClass === 'carton' && line.factor ? raw * line.factor : raw;
       const ok = orderKey(key, line, i);
       netByOrder.set(ok, (netByOrder.get(ok) || 0) + q);
     });
@@ -1716,6 +1935,10 @@ export function buildSalesIndex(sales) {
  *   - Rows whose Status is already "تم التسعير" are skipped unless
  *     includeAlreadyPriced is set, so re-running after an import is safe.
  *   - A negative quantity is priced by absolute value.
+ *   - The price comes from a sale in the return's own unit. Only if the
+ *     customer never bought the item in that unit is the other unit's price
+ *     converted through the price list's pack size; items with no sale at all
+ *     are never priced.
  *   - Descriptive columns blank on the Returns row are filled from the matched
  *     sale line; existing values are never overwritten.
  *   - Duplicate sale lines and returns larger than what was sold are warnings.
@@ -1728,7 +1951,8 @@ export function priceReturns(data, { includeAlreadyPriced = false } = {}) {
   const sales = Array.isArray(data.sales) ? data.sales : [];
   const returns = Array.isArray(data.returns) ? data.returns : [];
 
-  const { byKey } = buildSalesIndex(sales);
+  const pack = buildPackIndex(data.priceList);
+  const { byKey } = buildSalesIndex(sales, pack);
 
   const rows = returns.map((ret, index) => {
     const status = cleanText(ret.Status);
@@ -1782,6 +2006,10 @@ export function priceReturns(data, { includeAlreadyPriced = false } = {}) {
       matchTier: '',
       matchCandidates: 0,
 
+      // Set when the price came from a sale in the other unit (piece ↔ carton).
+      convertedFrom: '',
+      packFactor: null,
+
       issues: [],
 
       // Every row is ticked by default, including the ones that could not be
@@ -1825,8 +2053,16 @@ export function priceReturns(data, { includeAlreadyPriced = false } = {}) {
     // applicable sale is the most recent one whose quantity still stands: if the
     // newest date came back in full, the price falls back to the date before it.
     const key = matchKey(ret.Product_SKU, ret.Customer_Account);
-    const lines = byKey.get(key);
-    const pick = pickSaleLine(lines, variantKey(ret.Size, ret.Color));
+    const lines = byKey.get(key) || [];
+
+    // Unit first: a sale in the return's own unit always wins, however old.
+    // Only when the customer never bought the item in that unit is a sale in
+    // the other unit used, with its price converted through the pack size.
+    // An item with no sales at all is never priced, not even from the list.
+    const retUnit = unitKey(ret.Unit);
+    const sameUnit = lines.filter((l) => unitsAgree(l.unitClass, retUnit));
+    const converted = sameUnit.length === 0 && lines.length > 0;
+    const pick = pickSaleLine(converted ? lines : sameUnit, variantKey(ret.Size, ret.Color));
 
     if (!pick.line) {
       return fail(
@@ -1835,14 +2071,19 @@ export function priceReturns(data, { includeAlreadyPriced = false } = {}) {
     }
 
     const sale = pick.line;
-    row.matched = true;
+    const retFactor = packFactor(pack, ret.Product_SKU, ret.Size, ret.Color);
+    const factorOf = (l) => l.factor ?? retFactor;
+    const priceOf = (l) => convertPrice(l.unitPrice, l.unitClass, retUnit, factorOf(l));
 
     // How much was sold, as a positive count. The chosen line can legitimately
     // carry a zero or negative quantity (see lineRank) when the order records the
     // return against the sale, and comparing the returned count against that
     // raw figure would raise a bogus "returned more than sold" warning on a
-    // perfectly ordinary row.
-    row.saleQty = sale.quantity === null ? null : Math.abs(sale.quantity);
+    // perfectly ordinary row. Restated in the return's unit when converted.
+    const soldQty = sale.quantity === null
+      ? null
+      : convertPrice(Math.abs(sale.quantity), retUnit, sale.unitClass, factorOf(sale));
+    row.saleQty = soldQty === null ? null : round2(soldQty);
     row.matchTier = pick.tier;
     row.matchCandidates = pick.candidates;
 
@@ -1864,7 +2105,30 @@ export function priceReturns(data, { includeAlreadyPriced = false } = {}) {
       return fail('سعر الوحدة في سجل البيع المطابق ليس رقماً.');
     }
 
-    row.unitPrice = sale.unitPrice;
+    const price = priceOf(sale);
+    if (price === null) {
+      return fail(
+        `لا يوجد بيع لهذا الصنف للعميل بوحدة "${row.unit || '—'}"، والبيع الموجود بوحدة ` +
+        `"${sale.unit || '—'}" لا يمكن تحويله: الصنف غير موجود في قائمة الأسعار بسعر قطعة وسعر كرتونة.`,
+      );
+    }
+
+    // Matched only once a usable price exists, so `matched` and the status can
+    // never disagree in the summary.
+    row.matched = true;
+    row.unitPrice = round2(price);
+
+    if (converted) {
+      const factor = factorOf(sale);
+      row.convertedFrom = sale.unit;
+      row.packFactor = factor;
+      row.issues.push({
+        level: 'warn',
+        message: `لا يوجد بيع لهذا الصنف للعميل بوحدة "${row.unit}"؛ ` +
+                 `حُوِّل سعر بيع "${sale.unit}" ${formatNumber(sale.unitPrice)} ` +
+                 `باستخدام العبوة (${formatNumber(factor)} في الكرتونة) إلى ${formatNumber(row.unitPrice)}.`,
+      });
+    }
 
     // -- warnings ---------------------------------------------------------
     // Look at the pool the price was actually chosen from, not every candidate.
@@ -1872,7 +2136,7 @@ export function priceReturns(data, { includeAlreadyPriced = false } = {}) {
     // among several colours priced several ways, and that is a judgement call
     // even though the tier says "exact".
     const poolPrices = [...new Set(
-      pick.pool.filter((l) => l.unitPrice !== null).map((l) => formatNumber(l.unitPrice)),
+      pick.pool.map(priceOf).filter((p) => p !== null).map(formatNumber),
     )];
 
     if (poolPrices.length > 1) {
@@ -1884,16 +2148,16 @@ export function priceReturns(data, { includeAlreadyPriced = false } = {}) {
         message: pick.usedWildcard
           ? `للعميل ${poolPrices.length} سعراً مختلفاً لهذا الصنف (${poolPrices.join('، ')})، ` +
             'ولم يُحدَّد المقاس أو اللون في المرتجع للتمييز بينها. ' +
-            `تم اعتماد أحدث سعر: ${formatNumber(sale.unitPrice)}.`
+            `تم اعتماد أحدث سعر: ${formatNumber(row.unitPrice)}.`
           : `تعذّر تمييز المقاس أو اللون (${row.size || '—'} / ${row.color || '—'})، ` +
-            `واعتُمد أحدث سعر ${formatNumber(sale.unitPrice)} من بين ${poolPrices.length} أسعار مختلفة ` +
+            `واعتُمد أحدث سعر ${formatNumber(row.unitPrice)} من بين ${poolPrices.length} أسعار مختلفة ` +
             `(${poolPrices.join('، ')}) لنفس الصنف.`,
       });
     } else if (pick.tier === 'sku-only' && !pick.usedWildcard && pick.pool.length === 1) {
       // Nothing to choose between, so this is a note, not a warning.
       row.issues.push({
         level: 'info',
-        message: `لا يوجد سجل بيع بنفس المقاس واللون؛ اعتُمد السعر ${formatNumber(sale.unitPrice)} ` +
+        message: `لا يوجد سجل بيع بنفس المقاس واللون؛ اعتُمد السعر ${formatNumber(row.unitPrice)} ` +
                  'من السجل الوحيد المطابق للصنف.',
       });
     }
@@ -1902,7 +2166,7 @@ export function priceReturns(data, { includeAlreadyPriced = false } = {}) {
       row.issues.push({
         level: 'warn',
         message: 'كل سجلات بيع هذا الصنف للعميل مرتجِع بالكامل، ' +
-                 `فلا يوجد سعر حديث ساري؛ اعتُمد آخر سعر معروف ${formatNumber(sale.unitPrice)}.`,
+                 `فلا يوجد سعر حديث ساري؛ اعتُمد آخر سعر معروف ${formatNumber(row.unitPrice)}.`,
       });
     } else if (pick.steppedBack) {
       // The newest sale came back in full, so an earlier date supplied the price.
@@ -1916,7 +2180,7 @@ export function priceReturns(data, { includeAlreadyPriced = false } = {}) {
         level: 'warn',
         message: `أحدث ${formatQty(pick.steppedOver)} سجل بيع لهذا الصنف مرتجِع بالكامل، ` +
                  `فتم الرجوع إلى بيع أقدم${when} ` +
-                 `واعتماد السعر ${formatNumber(sale.unitPrice)}.`,
+                 `واعتماد السعر ${formatNumber(row.unitPrice)}.`,
       });
     }
 
@@ -1928,7 +2192,7 @@ export function priceReturns(data, { includeAlreadyPriced = false } = {}) {
     }
 
     // -- the actual maths -------------------------------------------------
-    row.calculatedValue = round2(returnedQty * sale.unitPrice);
+    row.calculatedValue = round2(returnedQty * row.unitPrice);
     return row;
   });
 
@@ -1974,6 +2238,9 @@ export function summarise(rows) {
     exact: 0,
     skuOnly: 0,
 
+    // Priced rows whose price was converted from the other unit.
+    converted: 0,
+
     totalValue: 0,
     selectedValue: 0,
   };
@@ -1984,6 +2251,7 @@ export function summarise(rows) {
       stats.matched += 1;
       if (row.matchTier === 'exact') stats.exact += 1;
       else stats.skuOnly += 1;
+      if (row.convertedFrom) stats.converted += 1;
     }
     else stats.unmatched += 1;
 
@@ -2571,9 +2839,13 @@ export function renderRows(containerId, rows, options = {}) {
     // whichever line the tier rules preferred. Both say "تم التسعير" because both
     // are correct answers to the question asked — the second line is what stops a
     // loosened match from being mistaken for a firm one.
-    const matchNote = priced && row.matchTier === 'sku-only'
-      ? `<span class="mt-1 block text-[10px] leading-tight text-slate-400">بكود الصنف فقط</span>`
-      : '';
+    const matchNote = (priced && row.convertedFrom
+      ? `<span class="mt-1 block text-[10px] font-semibold leading-tight text-amber-600">` +
+        `محوَّل من ${escapeHtml(row.convertedFrom)}</span>`
+      : '') +
+      (priced && row.matchTier === 'sku-only'
+        ? `<span class="mt-1 block text-[10px] leading-tight text-slate-400">بكود الصنف فقط</span>`
+        : '');
 
     return `
       <tr class="border-b border-slate-100 align-top hover:bg-slate-50/70 transition-colors

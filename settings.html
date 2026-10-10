@@ -92,6 +92,25 @@
           </div>
         </div>
 
+        <div>
+          <label for="price-list-url" class="block text-sm font-medium text-slate-700">
+            رابط قائمة الأسعار (العبوات) — اختياري
+          </label>
+          <input id="price-list-url" name="priceListUrl" type="url" spellcheck="false"
+                 autocomplete="off"
+                 placeholder="https://docs.google.com/spreadsheets/d/…/edit#gid=0"
+                 dir="ltr"
+                 class="mt-1.5 block w-full rounded-lg border-slate-300 font-mono text-sm
+                        placeholder:font-sans placeholder:text-slate-400
+                        focus:border-indigo-500 focus:ring-indigo-500" />
+          <p id="price-list-hint" class="mt-1.5 text-xs text-slate-400"></p>
+          <p class="mt-1 text-xs text-slate-400">
+            تبويب بالأعمدة <span class="font-mono" dir="ltr">Item, Unit, Price</span> (مثل AgentDist).
+            منه يُحسب عدد القطع في الكرتونة = سعر الكرتونة ÷ سعر القطعة، لتحويل السعر
+            عندما لا يوجد بيع بنفس وحدة المرتجع. انسخ الرابط وأنت واقف على التبويب نفسه.
+          </p>
+        </div>
+
         <p id="read-hint" class="text-xs font-medium"></p>
 
         <div class="flex flex-wrap items-center gap-3 border-t border-slate-100 pt-5">
@@ -188,8 +207,8 @@
           <dd id="count-returns" class="mt-0.5 font-semibold tabular-nums text-slate-900">—</dd>
         </div>
         <div>
-          <dt class="text-xs tracking-wide text-slate-400">طريقة النقل</dt>
-          <dd id="info-transport" class="mt-0.5 font-semibold text-slate-900">—</dd>
+          <dt class="text-xs tracking-wide text-slate-400">صفوف قائمة الأسعار</dt>
+          <dd id="count-prices" class="mt-0.5 font-semibold tabular-nums text-slate-900">—</dd>
         </div>
         <div>
           <dt class="text-xs tracking-wide text-slate-400">وقت الجدول</dt>
@@ -386,7 +405,7 @@
   <script type="module">
     import {
       loadConfig, saveConfig, clearConfig,
-      describeUrlProblem, describeShareLinkProblem, extractSpreadsheetId,
+      describeUrlProblem, describeShareLinkProblem, extractSpreadsheetId, extractSpreadsheetGid,
       apiPing, apiFetchData, setBadge, setBusy, setText, byId, formatTimestamp,
       confirmModal, closeModal, toast, toastSuccess, toastError, toastInfo,
       toastWarning,
@@ -405,6 +424,11 @@
         : '';
       byId('sales-range').value = config.salesRange || 'Sales';
       byId('returns-range').value = config.returnsRange || 'Returns';
+      byId('price-list-url').value = config.priceListId
+        ? `https://docs.google.com/spreadsheets/d/${config.priceListId}/edit` +
+          (config.priceListGid ? `#gid=${config.priceListGid}` : '')
+        : '';
+      validatePriceList();
 
       // Write + display settings
       byId('web-app-url').value = config.webAppUrl || '';
@@ -443,6 +467,31 @@
       hint.textContent = `✓ المعرّف: ${id}`;
     }
 
+    /** Show which spreadsheet + tab the price-list link resolves to. */
+    function validatePriceList() {
+      const hint = byId('price-list-hint');
+      const raw = byId('price-list-url').value.trim();
+
+      if (!raw) {
+        hint.className = 'mt-1.5 text-xs text-slate-400';
+        hint.textContent = 'بدون قائمة الأسعار تُسعَّر فقط المرتجعات التي لها بيع بنفس الوحدة.';
+        return;
+      }
+
+      const id = extractSpreadsheetId(raw);
+      const gid = extractSpreadsheetGid(raw);
+      if (!id) {
+        hint.className = 'mt-1.5 text-xs font-medium text-amber-600';
+        hint.textContent = '⚠ لم أتمكن من التعرّف على معرّف الجدول في هذا الرابط.';
+      } else if (!gid) {
+        hint.className = 'mt-1.5 text-xs font-medium text-amber-600';
+        hint.textContent = '⚠ الرابط لا يحتوي على gid=… — افتح تبويب AgentDist ثم انسخ الرابط من شريط العنوان.';
+      } else {
+        hint.className = 'mt-1.5 text-xs text-slate-400';
+        hint.textContent = `✓ المعرّف: ${id} · التبويب gid=${gid}`;
+      }
+    }
+
     /** Live hint for the read settings (sheet URL + tab names). */
     function validateRead() {
       const hint = byId('read-hint');
@@ -467,6 +516,8 @@
         spreadsheetId: extractSpreadsheetId(byId('sheet-url').value),
         salesRange: byId('sales-range').value.trim() || 'Sales',
         returnsRange: byId('returns-range').value.trim() || 'Returns',
+        priceListId: extractSpreadsheetId(byId('price-list-url').value),
+        priceListGid: extractSpreadsheetGid(byId('price-list-url').value),
       };
     }
 
@@ -595,7 +646,7 @@
           : warnings.length
           ? `تمت القراءة. ${warnings.length} ملاحظة — التفاصيل في سجل الصفحة الرئيسية.`
           : 'تمت القراءة بنجاح من رابط المشاركة.');
-        setText('info-transport', 'رابط المشاركة');
+        setText('count-prices', config.priceListId ? data.priceList.length : 'غير مضبوطة');
         setText('info-time', formatTimestamp(data.serverTime || new Date()));
 
         setText('count-sales', data.sales.length);
@@ -644,7 +695,7 @@
       setText('test-detail', 'تم مسح جميع الإعدادات.');
       setText('count-sales', '—');
       setText('count-returns', '—');
-      setText('info-transport', '—');
+      setText('count-prices', '—');
       setText('info-time', '—');
       toast('تم مسح جميع الإعدادات.', 'info', { title: 'إعادة ضبط' });
     }
@@ -673,6 +724,7 @@
         validateSheetId();
         validateRead();
       });
+      byId('price-list-url').addEventListener('input', validatePriceList);
       ['sales-range', 'returns-range'].forEach((id) => {
         byId(id).addEventListener('input', validateRead);
       });

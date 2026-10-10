@@ -143,6 +143,30 @@ screenshot but break naive matching:
   paste artefact and ignored *for matching only* — the table and the CSV still
   show exactly what the sheet contains.
 
+### Units: piece vs carton
+
+An item can be sold by the piece (`قطعة`, or `طقم` for sets) and by the carton
+(`كرتون`), at very different prices, so the `Unit` column is part of the match:
+
+1. The price comes from the latest standing sale **in the return's own unit**,
+   even if a sale in the other unit is newer.
+2. Only if the customer never bought the item in that unit is the other unit's
+   price converted: piece price = carton price ÷ pack size, and vice versa.
+   The pack size comes from the **price list** (the `AgentDist` tab: `Item`,
+   `Unit`, `Price`, `Size`, `Color`) as *list carton price ÷ list piece price*.
+   Such rows are marked «محوَّل من …» in the table.
+3. If the item is not in the price list with both units, the row is **not
+   priced**; neither is an item the customer never bought at all.
+
+Spellings are normalised (`قطعه`/`قطعة`, `كرتونة`/`كرتون`, `PCS`, `CTN`, …), and
+order quantities are netted in base units, so one carton sold against six
+pieces returned is not read as 1 − 6.
+
+The price list may live in another spreadsheet. Paste its link in Settings
+**while that tab is open**, so the link carries `gid=…`: the real tab name has
+an invisible leading kasra (`ِAgentDist`), and gviz silently serves the first tab
+when a name does not match.
+
 > **`Return_ID` is only needed for the optional Apps Script write path.** Reading,
 > pricing, the CSV export and the clipboard copy all work without it. Direct
 > write-back matches rows by key, so it needs a `Return_ID` column — placed
